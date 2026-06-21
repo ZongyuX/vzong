@@ -367,6 +367,85 @@ select.input-field option {
   max-height: 800px;
 }
 
+/* === Nav link === */
+.nav-link {
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+.nav-link:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+.nav-link.active {
+  background: rgba(0, 240, 255, 0.12);
+  color: var(--accent);
+  border: 1px solid var(--border);
+}
+
+/* === Tutorial code block === */
+.code-block {
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: rgba(0, 240, 255, 0.05);
+  border-bottom: 1px solid var(--border);
+}
+.code-block pre {
+  margin: 0;
+  padding: 14px 16px;
+  overflow-x: auto;
+}
+.code-block code {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Monaco', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #e0e0e0;
+  white-space: pre;
+}
+
+/* === Gallery video card thumb === */
+.video-card-thumb {
+  cursor: pointer;
+  transition: transform 0.3s ease;
+}
+.video-card-thumb:hover {
+  transform: scale(1.02);
+}
+.video-card-thumb:hover .backdrop-blur {
+  background: rgba(0, 240, 255, 0.2);
+}
+
+/* === Drag active state === */
+.drag-active {
+  outline: 2px dashed var(--accent);
+  outline-offset: -10px;
+  background: rgba(0, 240, 255, 0.04);
+}
+
+/* === Status indicator (Ollama) === */
+.bg-green-500 { background-color: #22c55e; }
+.bg-red-500 { background-color: #ef4444; }
+.bg-yellow-500 { background-color: #eab308; }
+.text-green-400 { color: #4ade80; }
+.text-red-400 { color: #f87171; }
+.text-yellow-400 { color: #facc15; }
+
 /* === Scrollbar === */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: var(--bg-primary); }

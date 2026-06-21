@@ -1,74 +1,84 @@
-// vzong · AI视频工坊 - 主应用逻辑（vanilla JS）
-// 包含：状态管理、认证、视频生成、画廊、设置、UI 渲染
+// vzong · AI视频导航 - 主应用逻辑（vanilla JS）
+// 架构：landing | tutorials | workshop | gallery | settings
+// 设计理念：网站只做引导与展示，不调用任何付费 AI 视频 API
 
 (function () {
   'use strict';
 
   // ===== 全局状态 =====
   const state = {
-    view: 'landing',           // landing | dashboard | gallery | settings
+    view: 'landing',
     lang: window.i18n.getLang(),
-    user: null,                // { uid, email, displayName, photoURL, isGuest }
-    credits: 0,
-    totalGenerated: 0,
-    tasks: [],                 // [{ id, params, status, progress, thumbnailDataUrl, videoUrl, createdAt, workOrder }]
-    activeTab: 'image-to-video', // 'text-to-video' | 'image-to-video'
-    // 表单状态
-    ttvPrompt: '',
-    itvPrompt: '',
-    itvImage: null,            // dataURL
-    cameraMovement: 'push',
-    duration: 8,
-    styles: ['cinematic'],
-    advancedOpen: false,
-    currentWorkOrder: null,    // 当前显示的工单
-    authMode: 'login',         // 'login' | 'signup'
+    user: null,
+    // 教程
+    tutorialProgress: {},   // { 'ch1-prep': true, ... }
+    activeTutorialId: null,
+    // 工坊
+    workshopIdea: '',
+    workshopCamera: 'push',
+    workshopDuration: 8,
+    workshopStyle: 'cinematic',
+    ollamaStatus: 'checking',  // 'checking' | 'online' | 'offline'
+    ollamaModels: [],
+    ollamaSelectedModel: '',
+    ollamaUrl: '',
+    workshopEnhancing: false,
+    workshopResult: null,     // { fullPrompt, workOrder }
+    workshopCalls: 0,
+    // 画廊
+    galleryItems: [],
+    galleryFilter: 'all',
+    gallerySort: 'newest',
+    gallerySearch: '',
+    galleryLoading: false,
+    // 设置
     showLoginDialog: false,
-    showCreditsDialog: false,
+    authMode: 'login',
+    authError: null,
   };
 
-  // 从 localStorage 恢复
+  // ===== 持久化 =====
   function loadState() {
     try {
-      const saved = localStorage.getItem('vzong-state');
+      const saved = localStorage.getItem('vzong-state-v2');
       if (saved) {
-        const parsed = JSON.parse(saved);
-        Object.assign(state, parsed);
+        const p = JSON.parse(saved);
+        state.tutorialProgress = p.tutorialProgress || {};
+        state.workshopCalls = p.workshopCalls || 0;
+        state.workshopCamera = p.workshopCamera || 'push';
+        state.workshopDuration = p.workshopDuration || 8;
+        state.workshopStyle = p.workshopStyle || 'cinematic';
       }
       const guest = localStorage.getItem('vzong-guest');
       if (guest) state.user = JSON.parse(guest);
+      state.ollamaUrl = window.OllamaClient.getUrl();
     } catch (e) {
-      console.warn('[State] 恢复失败：', e);
+      console.warn('[State] load failed:', e);
     }
-    // 默认值
-    if (!state.tasks) state.tasks = [];
-    if (!state.styles.length) state.styles = ['cinematic'];
   }
 
   function saveState() {
     try {
       const toSave = {
-        view: state.view,
-        tasks: state.tasks,
-        activeTab: state.activeTab,
-        cameraMovement: state.cameraMovement,
-        duration: state.duration,
-        styles: state.styles,
-        totalGenerated: state.totalGenerated,
+        tutorialProgress: state.tutorialProgress,
+        workshopCalls: state.workshopCalls,
+        workshopCamera: state.workshopCamera,
+        workshopDuration: state.workshopDuration,
+        workshopStyle: state.workshopStyle,
       };
-      localStorage.setItem('vzong-state', JSON.stringify(toSave));
+      localStorage.setItem('vzong-state-v2', JSON.stringify(toSave));
     } catch (e) {
-      console.warn('[State] 保存失败：', e);
+      console.warn('[State] save failed:', e);
     }
   }
 
-  // ===== Toast 通知 =====
-  function toast(message, type = 'info', duration = 3000) {
+  // ===== Toast =====
+  function toast(msg, type = 'info', duration = 3000) {
     const container = document.getElementById('toast-container');
     if (!container) return;
     const el = document.createElement('div');
     el.className = `toast ${type} slide-in-right`;
-    el.textContent = message;
+    el.textContent = msg;
     container.appendChild(el);
     setTimeout(() => {
       el.style.transition = 'opacity 0.3s, transform 0.3s';
@@ -78,1219 +88,1746 @@
     }, duration);
   }
 
-  // ===== 积分管理 =====
-  async function fetchCredits(uid) {
-    if (!window.fbConfig.isConfigured || !window.fbConfig.db) {
-      // 本地模式
-      const raw = localStorage.getItem(`vzong-credits-${uid}`);
-      if (raw) return JSON.parse(raw);
-      const initial = { credits: 20, totalGenerated: 0, updatedAt: Date.now() };
-      localStorage.setItem(`vzong-credits-${uid}`, JSON.stringify(initial));
-      return initial;
-    }
-    try {
-      const doc = await window.fbConfig.db.collection('userCredits').doc(uid).get();
-      if (doc.exists) return doc.data();
-      const initial = { credits: 20, totalGenerated: 0, updatedAt: Date.now() };
-      await window.fbConfig.db.collection('userCredits').doc(uid).set(initial);
-      return initial;
-    } catch (e) {
-      console.warn('[Credits] 读取失败：', e);
-      return { credits: 20, totalGenerated: 0 };
-    }
-  }
-
-  async function updateCredits(uid, updates) {
-    if (!window.fbConfig.isConfigured || !window.fbConfig.db) {
-      const raw = localStorage.getItem(`vzong-credits-${uid}`);
-      const current = raw ? JSON.parse(raw) : { credits: 20, totalGenerated: 0 };
-      const next = { ...current, ...updates, updatedAt: Date.now() };
-      localStorage.setItem(`vzong-credits-${uid}`, JSON.stringify(next));
-      return next;
-    }
-    try {
-      const ref = window.fbConfig.db.collection('userCredits').doc(uid);
-      const doc = await ref.get();
-      if (!doc.exists) {
-        await ref.set({ credits: 20, totalGenerated: 0, updatedAt: Date.now(), ...updates });
-      } else {
-        await ref.update({ ...updates, updatedAt: Date.now() });
-      }
-    } catch (e) {
-      console.warn('[Credits] 更新失败：', e);
-    }
-  }
-
-  async function loadUserCredits() {
-    if (!state.user) {
-      state.credits = 0;
-      state.totalGenerated = 0;
-      return;
-    }
-    const data = await fetchCredits(state.user.uid);
-    state.credits = data.credits;
-    state.totalGenerated = data.totalGenerated;
-    render();
-  }
-
-  function deductCredit() {
-    if (state.credits <= 0) {
-      state.showCreditsDialog = true;
+  // ===== 路由 =====
+  async function navigate(view, params) {
+    state.view = view;
+    if (params) Object.assign(state, params);
+    saveState();
+    // 进入 gallery 视图时异步刷新数据
+    if (view === 'gallery') {
       render();
-      return false;
+      await loadGallery();
+      render();
+    } else {
+      render();
     }
-    state.credits -= 1;
-    if (state.user) updateCredits(state.user.uid, { credits: state.credits });
-    return true;
-  }
-
-  function addCredits(amount) {
-    state.credits += amount;
-    if (state.user) updateCredits(state.user.uid, { credits: state.credits });
-    toast(`+${amount} ${window.i18n.t('common.creditsUnit')}`, 'success');
+    window.scrollTo({ top: 0, behavior: 'instant' });
   }
 
   // ===== 认证 =====
-  function createGuestUser() {
-    return {
-      uid: `guest-${Date.now()}`,
-      email: null,
-      displayName: window.i18n.t('settings.accountTypeGuest'),
-      photoURL: null,
-      isGuest: true,
-    };
-  }
-
-  function loginAsGuest() {
-    const guest = createGuestUser();
-    state.user = guest;
-    localStorage.setItem('vzong-guest', JSON.stringify(guest));
-    toast(window.i18n.t('auth.guestMode'), 'success');
-    loadUserCredits();
-    state.view = 'dashboard';
-    state.showLoginDialog = false;
-    render();
-  }
-
-  async function loginWithEmail(email, password) {
-    if (!window.fbConfig.isConfigured || !window.fbConfig.auth) {
-      throw new Error('Firebase 未配置，请使用访客模式');
+  function ensureGuest() {
+    if (!state.user) {
+      state.user = {
+        uid: 'guest_' + Math.random().toString(36).slice(2, 10),
+        displayName: '访客',
+        email: '',
+        isGuest: true,
+        joinedAt: Date.now(),
+      };
+      localStorage.setItem('vzong-guest', JSON.stringify(state.user));
     }
-    await window.fbConfig.auth.signInWithEmailAndPassword(email, password);
   }
 
-  async function signupWithEmail(email, password, username) {
-    if (!window.fbConfig.isConfigured || !window.fbConfig.auth) {
-      throw new Error('Firebase 未配置，请使用访客模式');
-    }
-    const cred = await window.fbConfig.auth.createUserWithEmailAndPassword(email, password);
-    if (cred.user) {
-      await cred.user.updateProfile({ displayName: username });
-    }
-    toast(`${window.i18n.t('auth.welcomeBack')}，${username}！`, 'success');
+  // ===== 主渲染入口 =====
+  function render() {
+    const app = document.getElementById('app');
+    if (!app) return;
+    const html = renderShell();
+    app.innerHTML = html;
+    window.i18n.applyTranslations(app);
+    bindShellEvents();
+    renderView();
   }
 
-  async function loginWithGoogle() {
-    if (!window.fbConfig.isConfigured || !window.fbConfig.auth) {
-      throw new Error('Firebase 未配置，请使用访客模式');
-    }
-    const provider = new firebase.auth.GoogleAuthProvider();
-    await window.fbConfig.auth.signInWithPopup(provider);
+  function renderShell() {
+    const lang = state.lang;
+    const user = state.user;
+    const navItems = ['home', 'tutorials', 'workshop', 'gallery', 'settings']
+      .map((v) => {
+        const isActive = (v === 'home' && state.view === 'landing') || state.view === v;
+        const label = window.i18n.t(`nav.${v}`);
+        return `<button class="nav-link ${isActive ? 'active' : ''}" data-nav="${v === 'home' ? 'landing' : v}">${label}</button>`;
+      })
+      .join('');
+
+    const rightPart = !user || user.isGuest
+      ? `<button class="btn-secondary text-sm" data-action="open-login" data-i18n="nav.login">登录</button>`
+      : `<div class="flex items-center gap-3">
+          <span class="text-sm text-white/60">${escapeHtml(user.displayName || user.email || '访客')}</span>
+          <button class="btn-ghost text-sm" data-action="logout" data-i18n="nav.logout">退出</button>
+        </div>`;
+
+    return `
+      <div class="min-h-screen flex flex-col">
+        <header class="sticky top-0 z-40 backdrop-blur-md bg-[#0A1128]/80 border-b border-white/5">
+          <div class="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
+            <button class="flex items-center gap-2 cursor-pointer" data-nav="landing">
+              <span class="w-8 h-8 rounded-lg bg-gradient-to-br from-[#00F0FF] to-[#0080FF] flex items-center justify-center text-[#0A1128] font-black text-lg">v</span>
+              <span class="text-lg font-bold tracking-tight">vzong<span class="text-[#00F0FF]">·</span><span class="text-sm font-medium text-white/70" data-i18n="brand.suffix">·AI视频导航</span></span>
+            </button>
+            <nav class="hidden md:flex items-center gap-1">${navItems}</nav>
+            <div class="flex items-center gap-3">
+              <div class="lang-toggle">
+                <button class="${lang === 'zh' ? 'active' : ''}" data-action="set-lang" data-lang="zh">中</button>
+                <button class="${lang === 'en' ? 'active' : ''}" data-action="set-lang" data-lang="en">EN</button>
+              </div>
+              ${rightPart}
+            </div>
+          </div>
+          <nav class="md:hidden flex items-center gap-1 overflow-x-auto px-4 pb-2 border-t border-white/5">
+            ${navItems}
+          </nav>
+        </header>
+
+        <main id="view-root" class="flex-1"></main>
+
+        <footer class="border-t border-white/5 mt-12 py-8 px-4">
+          <div class="max-w-7xl mx-auto text-center text-sm text-white/40">
+            <p class="mb-2" data-i18n="landing.footer.tagline"></p>
+            <p data-i18n="landing.footer.copyright"></p>
+          </div>
+        </footer>
+      </div>
+      ${state.showLoginDialog ? renderLoginDialog() : ''}
+    `;
   }
 
-  async function loginWithGithub() {
-    if (!window.fbConfig.isConfigured || !window.fbConfig.auth) {
-      throw new Error('Firebase 未配置，请使用访客模式');
-    }
-    const provider = new firebase.auth.GithubAuthProvider();
-    await window.fbConfig.auth.signInWithPopup(provider);
+  // ===== 登录弹窗 =====
+  function renderLoginDialog() {
+    const isLogin = state.authMode === 'login';
+    const titleKey = isLogin ? 'auth.loginTitle' : 'auth.signupBtn';
+    const switchAction = isLogin ? 'switch-to-signup' : 'switch-to-login';
+    const switchTextKey = isLogin ? 'auth.noAccount' : 'auth.hasAccount';
+    const switchBtnKey = isLogin ? 'auth.signup' : 'auth.login';
+    const submitKey = isLogin ? 'auth.loginBtn' : 'auth.signupBtn';
+    const fbReady = !!(window.fbConfig && window.fbConfig.isConfigured && window.fbConfig.auth);
+
+    return `
+      <div class="modal-overlay" id="login-overlay">
+        <div class="modal-content" style="max-width: 440px;">
+          <button class="absolute top-3 right-3 text-white/40 hover:text-white text-2xl leading-none" data-action="close-login">×</button>
+          <h2 class="text-2xl font-bold mb-1" data-i18n="${titleKey}"></h2>
+          <p class="text-sm text-white/60 mb-6" data-i18n="auth.loginSubtitle"></p>
+
+          ${!fbReady ? `
+            <div class="mb-4 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-xs text-yellow-300">
+              ⚠️ Firebase 未就绪，仅支持访客模式登录（云端功能不可用）
+            </div>
+          ` : ''}
+
+          <!-- 第三方登录 -->
+          <div class="space-y-2 mb-5">
+            <button class="w-full py-2.5 rounded-lg border border-white/15 hover:border-white/30 hover:bg-white/5 transition flex items-center justify-center gap-3 text-sm font-medium" data-auth="google">
+              <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.6 6.1 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.6 6.1 29.6 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.5 0 10.4-2.1 14.1-5.5l-6.5-5.5C29.6 34.6 27 35.5 24 35.5c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.6 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4.1 5.5l6.5 5.5C40.9 36.3 44 30.7 44 24c0-1.3-.1-2.3-.4-3.5z"/></svg>
+              <span data-i18n="auth.google"></span>
+            </button>
+            <button class="w-full py-2.5 rounded-lg border border-white/15 hover:border-white/30 hover:bg-white/5 transition flex items-center justify-center gap-3 text-sm font-medium" data-auth="github">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1.1-.8.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.8-1.7-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.3.8 1 .8 2.1v3.1c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
+              <span data-i18n="auth.github"></span>
+            </button>
+          </div>
+
+          <div class="flex items-center gap-3 mb-5">
+            <div class="flex-1 h-px bg-white/10"></div>
+            <span class="text-xs text-white/40">OR</span>
+            <div class="flex-1 h-px bg-white/10"></div>
+          </div>
+
+          <!-- 邮箱密码表单 -->
+          <form id="email-auth-form" class="space-y-3">
+            ${!isLogin ? `
+              <div>
+                <label class="block text-xs text-white/60 mb-1" data-i18n="auth.username"></label>
+                <input type="text" id="auth-username" class="input-field text-sm" autocomplete="username" />
+              </div>
+            ` : ''}
+            <div>
+              <label class="block text-xs text-white/60 mb-1" data-i18n="auth.email"></label>
+              <input type="email" id="auth-email" class="input-field text-sm" autocomplete="email" required />
+            </div>
+            <div>
+              <label class="block text-xs text-white/60 mb-1" data-i18n="auth.password"></label>
+              <input type="password" id="auth-password" class="input-field text-sm" autocomplete="${isLogin ? 'current-password' : 'new-password'}" required minlength="6" />
+            </div>
+            <button type="submit" class="btn-primary w-full" data-i18n="${submitKey}"></button>
+          </form>
+
+          ${state.authError ? `<p class="mt-3 text-xs text-red-400 text-center">${escapeHtml(state.authError)}</p>` : ''}
+
+          <!-- 切换登录/注册 -->
+          <div class="mt-4 text-center text-xs text-white/60">
+            <span data-i18n="${switchTextKey}"></span>
+            <button class="text-[#00F0FF] hover:underline ml-1" data-action="${switchAction}" data-i18n="${switchBtnKey}"></button>
+          </div>
+
+          <!-- 访客模式 -->
+          <div class="mt-5 pt-4 border-t border-white/10">
+            <button class="w-full py-2 rounded-lg text-sm text-white/70 hover:text-white hover:bg-white/5 transition" data-auth="guest">
+              <span data-i18n="auth.guest"></span>
+            </button>
+            <p class="text-xs text-white/40 text-center mt-2" data-i18n="auth.guestHint"></p>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
-  async function logout() {
-    if (window.fbConfig.isConfigured && window.fbConfig.auth) {
-      await window.fbConfig.auth.signOut();
-    }
-    localStorage.removeItem('vzong-guest');
-    state.user = null;
-    state.credits = 0;
-    state.totalGenerated = 0;
-    state.view = 'landing';
-    toast(window.i18n.t('auth.logoutSuccess'), 'success');
-    render();
+  // ===== 第三方登录提供者 =====
+  function googleProvider() {
+    if (typeof firebase === 'undefined' || !firebase.auth.GoogleAuthProvider) return null;
+    return new firebase.auth.GoogleAuthProvider();
+  }
+  function githubProvider() {
+    if (typeof firebase === 'undefined' || !firebase.auth.GithubAuthProvider) return null;
+    return new firebase.auth.GithubAuthProvider();
   }
 
-  function setupAuthListener() {
-    if (!window.fbConfig.isConfigured || !window.fbConfig.auth) {
-      // 未配置 Firebase：尝试恢复访客
-      const guest = localStorage.getItem('vzong-guest');
-      if (guest) {
-        try { state.user = JSON.parse(guest); } catch {}
-      }
+  // ===== 邮箱登录/注册 =====
+  async function handleEmailAuth() {
+    const email = (document.getElementById('auth-email') || {}).value || '';
+    const password = (document.getElementById('auth-password') || {}).value || '';
+    const username = (document.getElementById('auth-username') || {}).value || '';
+    if (!email || !password) {
+      state.authError = 'Email and password are required';
+      render();
       return;
     }
+    try {
+      if (state.authMode === 'signup') {
+        const cred = await window.fbConfig.auth.createUserWithEmailAndPassword(email, password);
+        if (username) {
+          await cred.user.updateProfile({ displayName: username });
+        }
+        toast(window.i18n.t('auth.signupSuccess'), 'success');
+      } else {
+        await window.fbConfig.auth.signInWithEmailAndPassword(email, password);
+        toast(window.i18n.t('auth.welcomeBack'), 'success');
+      }
+      state.showLoginDialog = false;
+      state.authError = null;
+      // onAuthStateChanged 会接管 state 更新
+    } catch (e) {
+      console.warn('[Auth] email auth failed:', e);
+      state.authError = humanizeAuthError(e);
+      render();
+    }
+  }
+
+  // ===== 第三方登录 =====
+  async function handleOAuth(providerName) {
+    if (!window.fbConfig || !window.fbConfig.isConfigured || !window.fbConfig.auth) {
+      toast('Firebase 未就绪，请使用访客模式', 'error');
+      return;
+    }
+    const provider = providerName === 'google' ? googleProvider() : githubProvider();
+    if (!provider) {
+      toast('当前 Firebase SDK 不支持此登录方式', 'error');
+      return;
+    }
+    try {
+      await window.fbConfig.auth.signInWithPopup(provider);
+      toast(window.i18n.t('auth.welcomeBack'), 'success');
+      state.showLoginDialog = false;
+      state.authError = null;
+    } catch (e) {
+      console.warn('[Auth] OAuth failed:', e);
+      // popup-blocked 等可降级到 redirect
+      if (e.code === 'auth/popup-blocked' || e.code === 'auth/cancelled-popup-request') {
+        try {
+          await window.fbConfig.auth.signInWithRedirect(provider);
+          return;
+        } catch (e2) {
+          toast(humanizeAuthError(e2), 'error');
+          return;
+        }
+      }
+      state.authError = humanizeAuthError(e);
+      render();
+    }
+  }
+
+  // ===== 访客登录 =====
+  function handleGuestLogin() {
+    ensureGuest();
+    state.showLoginDialog = false;
+    state.authError = null;
+    toast(window.i18n.t('auth.guestMode'), 'info');
+    render();
+  }
+
+  // ===== 把 Firebase 错误码转成人话 =====
+  function humanizeAuthError(e) {
+    const code = e && e.code ? e.code : '';
+    const lang = window.i18n ? window.i18n.getLang() : 'zh';
+    const map = {
+      'auth/invalid-email': lang === 'zh' ? '邮箱格式不正确' : 'Invalid email format',
+      'auth/user-disabled': lang === 'zh' ? '账号已被禁用' : 'Account disabled',
+      'auth/user-not-found': lang === 'zh' ? '用户不存在，请先注册' : 'User not found, please sign up first',
+      'auth/wrong-password': lang === 'zh' ? '密码错误' : 'Wrong password',
+      'auth/email-already-in-use': lang === 'zh' ? '邮箱已被注册' : 'Email already registered',
+      'auth/weak-password': lang === 'zh' ? '密码强度不足（至少 6 位）' : 'Weak password (min 6 chars)',
+      'auth/popup-closed-by-user': lang === 'zh' ? '登录窗口被关闭' : 'Login popup closed',
+      'auth/operation-not-allowed': lang === 'zh' ? '此登录方式未在 Firebase 控制台启用' : 'This sign-in method is not enabled in Firebase Console',
+      'auth/unauthorized-domain': lang === 'zh' ? '当前域名未在 Firebase 授权列表中' : 'This domain is not authorized in Firebase Console',
+      'auth/network-request-failed': lang === 'zh' ? '网络错误，请检查连接' : 'Network error',
+    };
+    return map[code] || (e && e.message ? e.message : window.i18n.t('error.auth'));
+  }
+
+  // ===== 监听 Firebase 登录状态变化 =====
+  function setupAuthObserver() {
+    if (!window.fbConfig || !window.fbConfig.isConfigured || !window.fbConfig.auth) return;
+    if (window._vzongAuthObs) return; // 已注册
+    window._vzongAuthObs = true;
     window.fbConfig.auth.onAuthStateChanged(async (fbUser) => {
       if (fbUser) {
         state.user = {
           uid: fbUser.uid,
-          email: fbUser.email,
-          displayName: fbUser.displayName || (fbUser.email ? fbUser.email.split('@')[0] : 'Creator'),
-          photoURL: fbUser.photoURL,
+          email: fbUser.email || '',
+          displayName: fbUser.displayName || (fbUser.email ? fbUser.email.split('@')[0] : '用户'),
+          photoURL: fbUser.photoURL || '',
           isGuest: false,
+          joinedAt: fbUser.metadata && fbUser.metadata.creationTime ? Date.parse(fbUser.metadata.creationTime) : Date.now(),
         };
-        await loadUserCredits();
-      } else {
-        // 退出后保持访客身份继续使用
-        const guest = localStorage.getItem('vzong-guest');
-        if (guest) {
-          try { state.user = JSON.parse(guest); } catch {}
-        } else {
-          state.user = null;
+        localStorage.setItem('vzong-guest', JSON.stringify(state.user));
+        // 同步用户积分到 Firestore（可选）
+        try {
+          await syncUserDoc(fbUser.uid, state.user);
+        } catch (e) {
+          console.warn('[Auth] syncUserDoc failed:', e);
         }
-        state.credits = 0;
-        state.totalGenerated = 0;
-      }
-      render();
-    });
-  }
-
-  // ===== 图片上传 =====
-  function handleImageUpload(file) {
-    if (!file) return;
-    if (!/^image\/(jpe?g|png)$/i.test(file.type)) {
-      toast(window.i18n.t('error.invalidImage'), 'error');
-      return;
-    }
-    if (file.size > 5 * 1024 * 1024) {
-      toast(window.i18n.t('error.fileTooLarge'), 'error');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      state.itvImage = e.target.result;
-      updateWorkOrder();
-      render();
-    };
-    reader.readAsDataURL(file);
-  }
-
-  // ===== Sora 2 工单生成 =====
-  function updateWorkOrder() {
-    const mode = state.activeTab;
-    const prompt = mode === 'text-to-video' ? state.ttvPrompt : state.itvPrompt;
-    state.currentWorkOrder = window.WorkOrder.generateWorkOrder({
-      prompt,
-      mode,
-      cameraMovement: state.cameraMovement,
-      duration: state.duration,
-      styles: state.styles,
-      hasImage: mode === 'image-to-video' && !!state.itvImage,
-    }, state.lang);
-  }
-
-  // ===== 视频生成（纯前端模拟） =====
-  const STYLE_PALETTES = {
-    cyberpunk: ['#FF00FF', '#00FFFF', '#FFFF00', '#FF0080'],
-    cinematic: ['#FFD700', '#FF6B35', '#C9302C', '#2C3E50'],
-    ink: ['#1A1A1A', '#4A4A4A', '#888888', '#E8E8E8'],
-    anime: ['#FF69B4', '#87CEEB', '#FFD700', '#98FB98'],
-    realistic: ['#8B7355', '#5D4E37', '#A0826D', '#3E2723'],
-    fantasy: ['#9370DB', '#FFB6C1', '#FFD700', '#00CED1'],
-    watercolor: ['#FFB6C1', '#B6E3F0', '#FFE4B5', '#C8A2C8'],
-  };
-
-  function generateThumbnail(params) {
-    return new Promise((resolve) => {
-      const canvas = document.createElement('canvas');
-      canvas.width = 640;
-      canvas.height = 360;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) { resolve(''); return; }
-
-      const style = params.styles[0] || 'cyberpunk';
-      const palette = STYLE_PALETTES[style] || STYLE_PALETTES.cinematic;
-      const time = (params.duration - 5) / 10;
-      const camera = params.cameraMovement;
-
-      // 背景
-      const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-      gradient.addColorStop(0, '#0A1128');
-      gradient.addColorStop(0.5, palette[0] + '33');
-      gradient.addColorStop(1, '#0A1128');
-      ctx.fillStyle = gradient;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      let cx = canvas.width / 2;
-      let cy = canvas.height / 2;
-      if (camera === 'pan') cx -= 50;
-      else if (camera === 'tilt') cy -= 30;
-
-      // 圆环
-      for (let i = 0; i < 5; i++) {
-        const radius = Math.max(1, 60 + i * 30 + time * 40);
-        ctx.beginPath();
-        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-        ctx.strokeStyle = palette[i % palette.length] + 'AA';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      }
-
-      // 中心发光体
-      const centerGradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, 80);
-      centerGradient.addColorStop(0, palette[0]);
-      centerGradient.addColorStop(0.5, palette[1] + 'AA');
-      centerGradient.addColorStop(1, 'transparent');
-      ctx.fillStyle = centerGradient;
-      ctx.beginPath();
-      ctx.arc(cx, cy, 80, 0, Math.PI * 2);
-      ctx.fill();
-
-      // 粒子
-      for (let i = 0; i < 30; i++) {
-        const angle = (i / 30) * Math.PI * 2;
-        const dist = 120 + Math.sin(i) * 30;
-        const x = cx + Math.cos(angle) * dist;
-        const y = cy + Math.sin(angle) * dist;
-        ctx.fillStyle = palette[i % palette.length] + 'CC';
-        ctx.fillRect(x - 2, y - 2, 4, 4);
-      }
-
-      // 叠加原图
-      const drawFinal = () => {
-        // 底部信息条
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-        ctx.fillRect(0, canvas.height - 40, canvas.width, 40);
-        ctx.fillStyle = '#00F0FF';
-        ctx.font = 'bold 14px sans-serif';
-        const styleText = params.styles.join(' · ') || '默认';
-        const modeLabel = params.mode === 'text-to-video' ? '文生视频' : '图生视频';
-        ctx.fillText(`${modeLabel} · ${params.duration}s · ${styleText}`, 16, canvas.height - 14);
-
-        // 播放按钮
-        ctx.fillStyle = 'rgba(0, 240, 255, 0.9)';
-        ctx.beginPath();
-        ctx.arc(canvas.width - 30, 30, 18, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#0A1128';
-        ctx.beginPath();
-        ctx.moveTo(canvas.width - 35, 22);
-        ctx.lineTo(canvas.width - 35, 38);
-        ctx.lineTo(canvas.width - 22, 30);
-        ctx.closePath();
-        ctx.fill();
-
-        resolve(canvas.toDataURL('image/png'));
-      };
-
-      if (params.imageDataUrl && params.imageDataUrl.startsWith('data:image')) {
-        const img = new Image();
-        img.onload = () => {
-          ctx.globalAlpha = 0.6;
-          ctx.drawImage(img, 20, 60, 180, 240);
-          ctx.globalAlpha = 1;
-          ctx.strokeStyle = palette[0];
-          ctx.lineWidth = 2;
-          ctx.strokeRect(20, 60, 180, 240);
-          drawFinal();
-        };
-        img.onerror = drawFinal;
-        img.src = params.imageDataUrl;
       } else {
-        drawFinal();
+        // 退出登录 - 但不要在用户是 guest 时清掉
+        if (state.user && !state.user.isGuest) {
+          state.user = null;
+          localStorage.removeItem('vzong-guest');
+          ensureGuest();
+        }
+      }
+      render();
+    });
+  }
+
+  // 同步用户文档到 Firestore
+  async function syncUserDoc(uid, userInfo) {
+    if (!window.fbConfig || !window.fbConfig.isConfigured || !window.fbConfig.db) return;
+    const ref = window.fbConfig.db.collection('users').doc(uid);
+    const doc = await ref.get();
+    if (!doc.exists) {
+      await ref.set({
+        uid,
+        email: userInfo.email,
+        displayName: userInfo.displayName,
+        photoURL: userInfo.photoURL,
+        createdAt: Date.now(),
+      });
+    } else {
+      await ref.update({
+        lastLoginAt: Date.now(),
+        displayName: userInfo.displayName,
+      });
+    }
+  }
+
+  function bindShellEvents() {
+    const app = document.getElementById('app');
+    app.querySelectorAll('[data-nav]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const v = el.getAttribute('data-nav');
+        navigate(v);
+      });
+    });
+    app.querySelectorAll('[data-action="set-lang"]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const l = el.getAttribute('data-lang');
+        window.i18n.setLang(l);
+        state.lang = l;
+        render();
+      });
+    });
+    app.querySelectorAll('[data-action="open-login"]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.showLoginDialog = true;
+        state.authMode = 'login';
+        state.authError = null;
+        render();
+      });
+    });
+    app.querySelectorAll('[data-action="close-login"]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.showLoginDialog = false;
+        state.authError = null;
+        render();
+      });
+    });
+    // 点击 overlay 关闭
+    app.querySelectorAll('#login-overlay').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        if (e.target === el) {
+          state.showLoginDialog = false;
+          state.authError = null;
+          render();
+        }
+      });
+    });
+    // 切换登录/注册
+    app.querySelectorAll('[data-action="switch-to-signup"]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.authMode = 'signup';
+        state.authError = null;
+        render();
+      });
+    });
+    app.querySelectorAll('[data-action="switch-to-login"]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.authMode = 'login';
+        state.authError = null;
+        render();
+      });
+    });
+    // 第三方登录
+    app.querySelectorAll('[data-auth]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const method = el.getAttribute('data-auth');
+        if (method === 'google' || method === 'github') {
+          handleOAuth(method);
+        } else if (method === 'guest') {
+          handleGuestLogin();
+        }
+      });
+    });
+    // 邮箱表单提交
+    const emailForm = app.querySelector('#email-auth-form');
+    if (emailForm) {
+      emailForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        handleEmailAuth();
+      });
+    }
+    app.querySelectorAll('[data-action="logout"]').forEach((el) => {
+      el.addEventListener('click', async () => {
+        // 如果是 Firebase 用户，先调用 signOut
+        if (window.fbConfig && window.fbConfig.isConfigured && window.fbConfig.auth && state.user && !state.user.isGuest) {
+          try { await window.fbConfig.auth.signOut(); } catch (e) {}
+        }
+        localStorage.removeItem('vzong-guest');
+        state.user = null;
+        ensureGuest();
+        toast(window.i18n.t('auth.logoutSuccess'), 'success');
+        render();
+      });
+    });
+  }
+
+  function renderView() {
+    const root = document.getElementById('view-root');
+    if (!root) return;
+    let html = '';
+    switch (state.view) {
+      case 'landing': html = renderLanding(); break;
+      case 'tutorials': html = state.activeTutorialId ? renderTutorialDetail() : renderTutorialList(); break;
+      case 'workshop': html = renderWorkshop(); break;
+      case 'gallery': html = renderGallery(); break;
+      case 'settings': html = renderSettings(); break;
+      default: html = renderLanding();
+    }
+    root.innerHTML = html;
+    window.i18n.applyTranslations(root);
+    bindViewEvents();
+  }
+
+  // ===== Landing =====
+  function renderLanding() {
+    const stats = [
+      { num: '6', key: 'landing.stats.tutorials' },
+      { num: '10+', key: 'landing.stats.models' },
+      { num: '7', key: 'landing.stats.styles' },
+      { num: '100', key: 'landing.stats.free' },
+    ];
+
+    const features = [
+      { icon: '📚', titleKey: 'landing.features.tutorial.title', descKey: 'landing.features.tutorial.desc', nav: 'tutorials' },
+      { icon: '✨', titleKey: 'landing.features.workshop.title', descKey: 'landing.features.workshop.desc', nav: 'workshop' },
+      { icon: '🎬', titleKey: 'landing.features.gallery.title', descKey: 'landing.features.gallery.desc', nav: 'gallery' },
+    ];
+
+    const steps = [
+      { num: '01', titleKey: 'landing.howitworks.step1.title', descKey: 'landing.howitworks.step1.desc' },
+      { num: '02', titleKey: 'landing.howitworks.step2.title', descKey: 'landing.howitworks.step2.desc' },
+      { num: '03', titleKey: 'landing.howitworks.step3.title', descKey: 'landing.howitworks.step3.desc' },
+      { num: '04', titleKey: 'landing.howitworks.step4.title', descKey: 'landing.howitworks.step4.desc' },
+    ];
+
+    return `
+      <section class="relative overflow-hidden">
+        <div class="hero-bg"></div>
+        <div class="hero-glow" style="top: -200px; left: -200px;"></div>
+        <div class="hero-glow" style="bottom: -300px; right: -100px; background: radial-gradient(circle, rgba(0,128,255,0.12) 0%, transparent 70%);"></div>
+
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 py-20 md:py-32 relative">
+          <div class="text-center max-w-4xl mx-auto">
+            <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-[#00F0FF]/10 border border-[#00F0FF]/30 text-xs text-[#00F0FF] mb-6">
+              <span class="w-1.5 h-1.5 rounded-full bg-[#00F0FF] animate-pulse"></span>
+              <span data-i18n="landing.badge"></span>
+            </div>
+            <h1 class="text-4xl md:text-6xl lg:text-7xl font-black leading-tight tracking-tight mb-6">
+              <span class="gradient-text" data-i18n="landing.titleLine1"></span>
+              <br/>
+              <span data-i18n="landing.titleLine2"></span>
+            </h1>
+            <p class="text-base md:text-lg text-white/60 max-w-2xl mx-auto mb-8" data-i18n="landing.subtitle"></p>
+            <div class="flex flex-wrap items-center justify-center gap-4">
+              <button class="btn-primary text-base" data-nav="tutorials">
+                <span data-i18n="landing.cta.startTutorial"></span>
+                <span class="ml-2">→</span>
+              </button>
+              <button class="btn-secondary text-base" data-nav="workshop" data-i18n="landing.cta.visitWorkshop"></button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-16 max-w-4xl mx-auto">
+            ${stats.map((s) => `
+              <div class="glass-card p-5 text-center">
+                <div class="text-3xl md:text-4xl font-black gradient-text">${s.num}</div>
+                <div class="text-xs md:text-sm text-white/60 mt-1" data-i18n="${s.key}"></div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </section>
+
+      <section class="max-w-7xl mx-auto px-4 sm:px-6 py-16">
+        <div class="text-center mb-12">
+          <h2 class="text-2xl md:text-3xl font-bold mb-3" data-i18n="landing.howitworks.title"></h2>
+          <p class="text-white/60" data-i18n="landing.howitworks.subtitle"></p>
+        </div>
+        <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+          ${steps.map((s) => `
+            <div class="glass-card glass-card-hover p-6">
+              <div class="text-3xl font-black gradient-text mb-3">${s.num}</div>
+              <h3 class="text-lg font-bold mb-2" data-i18n="${s.titleKey}"></h3>
+              <p class="text-sm text-white/60" data-i18n="${s.descKey}"></p>
+            </div>
+          `).join('')}
+        </div>
+      </section>
+
+      <section class="max-w-7xl mx-auto px-4 sm:px-6 py-16">
+        <div class="text-center mb-12">
+          <h2 class="text-2xl md:text-3xl font-bold mb-3" data-i18n="landing.features.title"></h2>
+          <p class="text-white/60" data-i18n="landing.features.subtitle"></p>
+        </div>
+        <div class="grid md:grid-cols-3 gap-6">
+          ${features.map((f) => `
+            <div class="glass-card glass-card-hover p-8 cursor-pointer" data-nav="${f.nav}">
+              <div class="text-4xl mb-4">${f.icon}</div>
+              <h3 class="text-xl font-bold mb-3" data-i18n="${f.titleKey}"></h3>
+              <p class="text-sm text-white/60" data-i18n="${f.descKey}"></p>
+            </div>
+          `).join('')}
+        </div>
+      </section>
+
+      <section class="max-w-4xl mx-auto px-4 sm:px-6 py-16">
+        <div class="glass-card p-10 md:p-12 text-center pulse-glow">
+          <h2 class="text-2xl md:text-3xl font-bold mb-4" data-i18n="landing.ctaFinal.title"></h2>
+          <p class="text-white/60 mb-8" data-i18n="landing.ctaFinal.subtitle"></p>
+          <button class="btn-primary text-base" data-nav="tutorials" data-i18n="landing.ctaFinal.button"></button>
+        </div>
+      </section>
+    `;
+  }
+
+  // ===== 教程列表 =====
+  function renderTutorialList() {
+    const tutorials = window.TUTORIALS || [];
+    const completedCount = tutorials.filter((t) => state.tutorialProgress[t.id]).length;
+    const totalCount = tutorials.length;
+    const progressPct = totalCount ? Math.round(completedCount / totalCount * 100) : 0;
+
+    const cards = tutorials.map((t, i) => {
+      const content = t[state.lang] || t.zh;
+      const done = !!state.tutorialProgress[t.id];
+      const diffKey = `tutorial.difficulty.${t.difficulty}`;
+      return `
+        <div class="glass-card glass-card-hover p-6 cursor-pointer" data-tutorial="${t.id}">
+          <div class="flex items-start justify-between mb-3">
+            <div class="text-5xl font-black gradient-text leading-none">${String(i + 1).padStart(2, '0')}</div>
+            ${done ? `<span class="text-xs px-2 py-1 rounded-full bg-green-500/20 text-green-400 border border-green-500/40">
+              <span data-i18n="tutorial.completed"></span> ✓
+            </span>` : ''}
+          </div>
+          <h3 class="text-lg font-bold mb-2">${escapeHtml(content.title)}</h3>
+          <p class="text-sm text-white/60 mb-4">${escapeHtml(content.summary)}</p>
+          <div class="flex items-center gap-3 text-xs text-white/40">
+            <span>⏱ ${window.i18n.t('tutorial.estimatedTime', { min: t.estimatedMin })}</span>
+            <span>·</span>
+            <span data-i18n="${diffKey}"></span>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <section class="max-w-7xl mx-auto px-4 sm:px-6 py-12">
+        <div class="mb-8">
+          <h1 class="text-3xl md:text-4xl font-black mb-3" data-i18n="tutorial.title"></h1>
+          <p class="text-white/60" data-i18n="tutorial.subtitle"></p>
+        </div>
+
+        <div class="glass-card p-6 mb-8">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-sm font-semibold" data-i18n="tutorial.progress"></span>
+            <span class="text-sm text-[#00F0FF]">${window.i18n.t('tutorial.progressHint', { done: completedCount, total: totalCount })}</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-bar-fill" style="width: ${progressPct}%"></div>
+          </div>
+        </div>
+
+        <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+          ${cards}
+        </div>
+      </section>
+    `;
+  }
+
+  // ===== 教程详情 =====
+  function renderTutorialDetail() {
+    const tutorial = (window.TUTORIALS || []).find((t) => t.id === state.activeTutorialId);
+    if (!tutorial) {
+      state.activeTutorialId = null;
+      return renderTutorialList();
+    }
+    const content = tutorial[state.lang] || tutorial.zh;
+    const idx = window.TUTORIALS.indexOf(tutorial);
+    const prev = idx > 0 ? window.TUTORIALS[idx - 1] : null;
+    const next = idx < window.TUTORIALS.length - 1 ? window.TUTORIALS[idx + 1] : null;
+    const done = !!state.tutorialProgress[tutorial.id];
+    const diffKey = `tutorial.difficulty.${tutorial.difficulty}`;
+
+    const stepsHtml = content.steps.map((step, i) => renderTutorialStep(step, i)).join('');
+
+    return `
+      <section class="max-w-4xl mx-auto px-4 sm:px-6 py-8">
+        <button class="btn-ghost text-sm mb-4" data-action="back-to-tutorials">
+          ← <span data-i18n="tutorial.backToList"></span>
+        </button>
+
+        <div class="mb-8">
+          <div class="flex items-center gap-3 mb-3">
+            <span class="text-xs px-2 py-1 rounded-full bg-[#00F0FF]/10 text-[#00F0FF] border border-[#00F0FF]/30" data-i18n="${diffKey}"></span>
+            <span class="text-xs text-white/40">⏱ ${window.i18n.t('tutorial.estimatedTime', { min: tutorial.estimatedMin })}</span>
+          </div>
+          <h1 class="text-3xl md:text-4xl font-black mb-3">${escapeHtml(content.title)}</h1>
+          <p class="text-white/60 text-lg">${escapeHtml(content.summary)}</p>
+        </div>
+
+        <div class="space-y-6 mb-8">
+          ${stepsHtml}
+        </div>
+
+        <div class="flex flex-wrap items-center justify-between gap-4 mb-8">
+          <button class="btn-ghost text-sm" data-action="${prev ? 'go-tutorial' : 'back-to-tutorials'}" data-tutorial="${prev ? prev.id : ''}">
+            ← <span data-i18n="tutorial.prevChapter"></span>
+          </button>
+          <button class="${done ? 'btn-secondary' : 'btn-primary'} text-sm" data-action="toggle-tutorial-done" data-tutorial="${tutorial.id}">
+            ${done ? '✓ ' : ''}<span data-i18n="${done ? 'tutorial.markedInComplete' : 'tutorial.markComplete'}"></span>
+          </button>
+          <button class="btn-ghost text-sm" data-action="${next ? 'go-tutorial' : 'back-to-tutorials'}" data-tutorial="${next ? next.id : ''}">
+            <span data-i18n="tutorial.nextChapter"></span> →
+          </button>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderTutorialStep(step, idx) {
+    if (step.type === 'text') {
+      const heading = step.heading ? `<h3 class="text-xl font-bold mb-3 text-white">${escapeHtml(step.heading)}</h3>` : '';
+      return `<div class="glass-card p-6">
+        ${heading}
+        <p class="text-white/80 leading-relaxed">${escapeHtml(step.content)}</p>
+      </div>`;
+    }
+    if (step.type === 'code') {
+      return `<div class="glass-card p-6">
+        ${step.heading ? `<h3 class="text-xl font-bold mb-3 text-white">${escapeHtml(step.heading)}</h3>` : ''}
+        <div class="code-block">
+          <div class="code-block-header">
+            <span class="text-xs text-white/40">${escapeHtml(step.lang || 'code')}</span>
+            <button class="text-xs text-[#00F0FF] hover:text-white transition" data-copy-code="${idx}">
+              <span data-i18n="tutorial.copyCode"></span>
+            </button>
+          </div>
+          <pre><code>${escapeHtml(step.content)}</code></pre>
+        </div>
+      </div>`;
+    }
+    if (step.type === 'warning') {
+      return `<div class="glass-card p-6 border-l-4 border-yellow-500/60 bg-yellow-500/5">
+        <div class="flex items-start gap-3">
+          <span class="text-2xl">⚠️</span>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-yellow-400 mb-2" data-i18n="tutorial.warning"></div>
+            <p class="text-white/80">${escapeHtml(step.content)}</p>
+          </div>
+        </div>
+      </div>`;
+    }
+    if (step.type === 'tip') {
+      return `<div class="glass-card p-6 border-l-4 border-[#00F0FF]/60 bg-[#00F0FF]/5">
+        <div class="flex items-start gap-3">
+          <span class="text-2xl">💡</span>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-[#00F0FF] mb-2" data-i18n="tutorial.tip"></div>
+            <p class="text-white/80">${escapeHtml(step.content)}</p>
+          </div>
+        </div>
+      </div>`;
+    }
+    if (step.type === 'requirement') {
+      return `<div class="glass-card p-6 border-l-4 border-blue-500/60 bg-blue-500/5">
+        <div class="flex items-start gap-3">
+          <span class="text-2xl">📋</span>
+          <div class="flex-1">
+            <div class="text-sm font-bold text-blue-400 mb-2" data-i18n="tutorial.requirement"></div>
+            <p class="text-white/80">${escapeHtml(step.content)}</p>
+          </div>
+        </div>
+      </div>`;
+    }
+    return '';
+  }
+
+  // ===== 创意工坊 =====
+  function renderWorkshop() {
+    const statusColor = state.ollamaStatus === 'online' ? 'green' : (state.ollamaStatus === 'offline' ? 'red' : 'yellow');
+    const statusKey = state.ollamaStatus === 'online' ? 'workshop.ollamaOnline'
+                    : (state.ollamaStatus === 'offline' ? 'workshop.ollamaOffline' : 'workshop.ollamaChecking');
+
+    const cameraOptions = ['push', 'pull', 'pan', 'tilt', 'random'].map((c) =>
+      `<button class="capsule-btn ${state.workshopCamera === c ? 'active' : ''}" data-camera="${c}" data-i18n="workshop.camera.${c}"></button>`
+    ).join('');
+
+    const styleOptions = ['cinematic', 'cyberpunk', 'ink', 'anime', 'realistic', 'fantasy', 'watercolor'].map((s) =>
+      `<button class="capsule-btn ${state.workshopStyle === s ? 'active' : ''}" data-style="${s}" data-i18n="workshop.style.${s}"></button>`
+    ).join('');
+
+    const examples = ['example1', 'example2', 'example3', 'example4'].map((k) =>
+      `<button class="text-xs text-[#00F0FF] hover:underline" data-example="${k}" data-i18n="workshop.${k}"></button>`
+    ).join(' · ');
+
+    const modelOptions = state.ollamaModels.length
+      ? state.ollamaModels.map((m) => `<option value="${escapeHtml(m)}" ${state.ollamaSelectedModel === m ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')
+      : `<option value="" data-i18n="workshop.ollamaNoModels"></option>`;
+
+    const resultHtml = state.workshopResult
+      ? renderWorkshopResult(state.workshopResult)
+      : `<div class="text-center py-12 text-white/40">
+          <div class="text-4xl mb-3">✨</div>
+          <p data-i18n="workshop.result.empty"></p>
+        </div>`;
+
+    return `
+      <section class="max-w-5xl mx-auto px-4 sm:px-6 py-12">
+        <div class="mb-8">
+          <h1 class="text-3xl md:text-4xl font-black mb-3" data-i18n="workshop.title"></h1>
+          <p class="text-white/60" data-i18n="workshop.subtitle"></p>
+        </div>
+
+        <div class="grid lg:grid-cols-3 gap-6">
+          <div class="lg:col-span-2 space-y-6">
+            <!-- 输入 -->
+            <div class="glass-card p-6">
+              <label class="block text-sm font-semibold mb-2" data-i18n="workshop.ideaLabel"></label>
+              <textarea id="workshop-idea" class="input-field" placeholder="" data-i18n-placeholder="workshop.ideaPlaceholder" rows="4">${escapeHtml(state.workshopIdea)}</textarea>
+              <div class="mt-2 text-xs text-white/40">
+                <span data-i18n="workshop.examples"></span>: ${examples}
+              </div>
+            </div>
+
+            <!-- 高级设置 -->
+            <div class="glass-card p-6">
+              <h3 class="text-sm font-semibold mb-4" data-i18n="workshop.advanced"></h3>
+
+              <div class="mb-4">
+                <label class="block text-xs text-white/60 mb-2" data-i18n="workshop.camera"></label>
+                <div class="flex flex-wrap gap-2">${cameraOptions}</div>
+              </div>
+
+              <div class="mb-4">
+                <label class="block text-xs text-white/60 mb-2">
+                  <span data-i18n="workshop.duration"></span>: <span class="text-[#00F0FF] font-bold">${state.workshopDuration}</span><span data-i18n="workshop.durationUnit"></span>
+                </label>
+                <input type="range" min="5" max="15" value="${state.workshopDuration}" id="workshop-duration" />
+              </div>
+
+              <div>
+                <label class="block text-xs text-white/60 mb-2" data-i18n="workshop.style"></label>
+                <div class="flex flex-wrap gap-2">${styleOptions}</div>
+              </div>
+            </div>
+
+            <!-- 操作按钮 -->
+            <div class="flex flex-wrap gap-3">
+              <button class="btn-primary" id="enhance-btn" ${state.workshopEnhancing ? 'disabled' : ''}>
+                ${state.workshopEnhancing ? `<span class="inline-block w-4 h-4 border-2 border-[#0A1128]/30 border-t-[#0A1128] rounded-full animate-spin mr-2"></span><span data-i18n="workshop.enhancing"></span>`
+                  : (state.ollamaStatus === 'online'
+                    ? `<span data-i18n="workshop.enhance"></span>`
+                    : `<span data-i18n="workshop.fallback"></span>`)}
+              </button>
+              ${state.ollamaStatus === 'offline' ? `<p class="text-xs text-white/40 self-center" data-i18n="workshop.fallbackHint"></p>` : ''}
+            </div>
+
+            <!-- 结果 -->
+            <div class="glass-card p-6">
+              <h3 class="text-sm font-semibold mb-4" data-i18n="workshop.result.title"></h3>
+              ${resultHtml}
+            </div>
+          </div>
+
+          <!-- 侧栏：Ollama 状态 -->
+          <aside class="space-y-6">
+            <div class="glass-card p-6">
+              <div class="flex items-center justify-between mb-3">
+                <span class="text-sm font-semibold" data-i18n="workshop.ollamaStatus"></span>
+                <span class="inline-flex items-center gap-2 text-xs">
+                  <span class="w-2 h-2 rounded-full bg-${statusColor}-500 ${state.ollamaStatus === 'checking' ? 'animate-pulse' : ''}"></span>
+                  <span class="text-${statusColor}-400" data-i18n="${statusKey}"></span>
+                </span>
+              </div>
+
+              <label class="block text-xs text-white/60 mb-1" data-i18n="workshop.ollamaUrl"></label>
+              <input type="text" class="input-field text-sm mb-2" id="ollama-url" value="${escapeHtml(state.ollamaUrl)}" placeholder="http://localhost:11434" />
+              <p class="text-xs text-white/40 mb-3" data-i18n="workshop.ollamaUrlHint"></p>
+
+              <label class="block text-xs text-white/60 mb-1" data-i18n="workshop.ollamaModel"></label>
+              <select class="input-field text-sm mb-2" id="ollama-model" ${state.ollamaModels.length === 0 ? 'disabled' : ''}>
+                ${modelOptions}
+              </select>
+              <button class="btn-ghost text-xs w-full text-center" id="ollama-refresh">
+                ↻ <span data-i18n="workshop.ollamaRefresh"></span>
+              </button>
+
+              <details class="mt-4 text-xs text-white/60">
+                <summary class="cursor-pointer text-[#00F0FF]" data-i18n="workshop.ollamaHelp"></summary>
+                <p class="mt-2 leading-relaxed" data-i18n="workshop.ollamaHelpDesc"></p>
+              </details>
+            </div>
+
+            <div class="glass-card p-6">
+              <div class="text-xs text-white/60 mb-2" data-i18n="settings.stats.workshopCount"></div>
+              <div class="text-3xl font-black gradient-text">${state.workshopCalls}</div>
+            </div>
+          </aside>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderWorkshopResult(result) {
+    const wo = result.workOrder;
+    const lang = state.lang;
+    const woHtml = wo ? `
+      <div class="space-y-3 mt-4">
+        ${renderWorkOrderRow('subject', wo.subject)}
+        ${renderWorkOrderRow('scene', wo.scene)}
+        ${renderWorkOrderRow('action', wo.action)}
+        ${renderWorkOrderRow('camera', wo.camera)}
+        ${renderWorkOrderRow('style', wo.style)}
+        ${renderWorkOrderRow('constraints', wo.constraints)}
+      </div>
+    ` : '';
+
+    return `
+      <div class="mb-4">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-semibold text-white/60" data-i18n="workshop.result.fullPrompt"></span>
+          <button class="text-xs text-[#00F0FF] hover:underline" data-copy-text="${encodeURIComponent(result.fullPrompt)}">
+            <span data-i18n="workshop.result.copyPrompt"></span>
+          </button>
+        </div>
+        <div class="bg-black/30 rounded-lg p-4 text-sm text-white/90 leading-relaxed whitespace-pre-wrap">${escapeHtml(result.fullPrompt)}</div>
+      </div>
+
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-semibold text-white/60" data-i18n="workshop.result.workOrder"></span>
+          <button class="text-xs text-[#00F0FF] hover:underline" data-copy-text="${encodeURIComponent(window.WorkOrder.workOrderToText(wo, lang))}">
+            <span data-i18n="workshop.result.copyWorkOrder"></span>
+          </button>
+        </div>
+        ${woHtml}
+      </div>
+    `;
+  }
+
+  function renderWorkOrderRow(key, value) {
+    return `
+      <div class="flex gap-3">
+        <div class="w-20 flex-shrink-0 text-xs text-[#00F0FF] font-semibold pt-0.5" data-i18n="workshop.result.${key}"></div>
+        <div class="flex-1 text-sm text-white/80">${escapeHtml(value)}</div>
+      </div>
+    `;
+  }
+
+  // ===== 画廊 =====
+  async function loadGallery() {
+    state.galleryLoading = true;
+    try {
+      const items = await window.GalleryDB.getAllMeta();
+      state.galleryItems = items.sort((a, b) => b.createdAt - a.createdAt);
+    } catch (e) {
+      console.error('[Gallery] load failed:', e);
+      state.galleryItems = [];
+    } finally {
+      state.galleryLoading = false;
+    }
+  }
+
+  function renderGallery() {
+    const items = state.galleryItems || [];
+    const filtered = items.filter((it) => {
+      if (state.galleryFilter !== 'all' && it.style !== state.galleryFilter) return false;
+      if (state.gallerySearch) {
+        const q = state.gallerySearch.toLowerCase();
+        const text = `${it.title || ''} ${it.description || ''} ${it.prompt || ''}`.toLowerCase();
+        if (!text.includes(q)) return false;
+      }
+      return true;
+    });
+    const sorted = [...filtered].sort((a, b) => {
+      return state.gallerySort === 'newest' ? b.createdAt - a.createdAt : a.createdAt - b.createdAt;
+    });
+
+    const totalDuration = items.reduce((s, it) => s + (it.duration || 0), 0);
+    const totalSize = items.reduce((s, it) => s + (it.size || 0), 0);
+    const styleSet = new Set(items.map((it) => it.style).filter(Boolean));
+
+    const stats = [
+      { num: items.length, key: 'gallery.statTotal' },
+      { num: formatDuration(totalDuration), key: 'gallery.statDuration' },
+      { num: formatSize(totalSize), key: 'gallery.statStorage' },
+      { num: styleSet.size, key: 'gallery.statStyles' },
+    ];
+
+    const styleFilters = ['all', 'cinematic', 'cyberpunk', 'ink', 'anime', 'realistic', 'fantasy', 'watercolor'].map((s) => {
+      const label = s === 'all' ? window.i18n.t('gallery.filterAll') : window.i18n.t(`workshop.style.${s}`);
+      return `<button class="capsule-btn ${state.galleryFilter === s ? 'active' : ''}" data-gallery-filter="${s}">${label}</button>`;
+    }).join('');
+
+    const cards = sorted.length ? sorted.map((it) => renderGalleryCard(it)).join('') : '';
+
+    return `
+      <section class="max-w-7xl mx-auto px-4 sm:px-6 py-12">
+        <div class="flex flex-wrap items-center justify-between gap-4 mb-8">
+          <div>
+            <h1 class="text-3xl md:text-4xl font-black mb-2" data-i18n="gallery.title"></h1>
+            <p class="text-white/60" data-i18n="gallery.subtitle"></p>
+          </div>
+          <button class="btn-primary" id="gallery-upload-btn">
+            <span data-i18n="gallery.uploadBtn"></span> ↑
+          </button>
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+          ${stats.map((s) => `
+            <div class="glass-card p-4 text-center">
+              <div class="text-2xl font-black gradient-text">${s.num}</div>
+              <div class="text-xs text-white/60 mt-1" data-i18n="${s.key}"></div>
+            </div>
+          `).join('')}
+        </div>
+
+        <div class="glass-card p-4 mb-6">
+          <div class="flex flex-wrap items-center gap-3 mb-3">
+            <span class="text-xs text-white/60" data-i18n="gallery.filter"></span>
+            <div class="flex flex-wrap gap-2">${styleFilters}</div>
+          </div>
+          <div class="flex flex-wrap items-center gap-3">
+            <input type="text" class="input-field text-sm flex-1 min-w-[200px]" id="gallery-search" value="${escapeHtml(state.gallerySearch)}" placeholder="" data-i18n-placeholder="gallery.searchPlaceholder" />
+            <select class="input-field text-sm w-auto" id="gallery-sort">
+              <option value="newest" ${state.gallerySort === 'newest' ? 'selected' : ''} data-i18n="gallery.sortNewest"></option>
+              <option value="oldest" ${state.gallerySort === 'oldest' ? 'selected' : ''} data-i18n="gallery.sortOldest"></option>
+            </select>
+          </div>
+        </div>
+
+        ${state.galleryLoading ? `
+          <div class="text-center py-12 text-white/40">
+            <div class="inline-block w-8 h-8 border-2 border-[#00F0FF]/30 border-t-[#00F0FF] rounded-full animate-spin mb-3"></div>
+            <p data-i18n="common.loading"></p>
+          </div>
+        ` : sorted.length === 0 ? `
+          <div class="glass-card p-12 text-center">
+            <div class="text-5xl mb-4">🎬</div>
+            <h3 class="text-xl font-bold mb-2" data-i18n="gallery.empty.title"></h3>
+            <p class="text-sm text-white/60 mb-6 max-w-md mx-auto" data-i18n="gallery.empty.desc"></p>
+            <button class="btn-secondary" data-nav="tutorials" data-i18n="gallery.empty.cta"></button>
+          </div>
+        ` : `
+          <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+            ${cards}
+          </div>
+        `}
+
+        <input type="file" id="gallery-file-input" accept="video/mp4,video/webm,video/quicktime" class="hidden" />
+      </section>
+    `;
+  }
+
+  function renderGalleryCard(it) {
+    const styleLabel = it.style ? window.i18n.t(`workshop.style.${it.style}`) : '';
+    return `
+      <div class="task-card overflow-hidden">
+        <div class="relative bg-black/40 aspect-video flex items-center justify-center video-card-thumb" data-video-id="${it.id}">
+          <div class="absolute inset-0 flex items-center justify-center">
+            <div class="w-12 h-12 rounded-full bg-white/10 backdrop-blur flex items-center justify-center">
+              <span class="text-2xl">▶</span>
+            </div>
+          </div>
+          <div class="absolute top-2 right-2 text-xs bg-black/60 px-2 py-0.5 rounded">${formatDuration(it.duration || 0)}</div>
+          ${styleLabel ? `<div class="absolute top-2 left-2 text-xs bg-[#00F0FF]/80 text-[#0A1128] px-2 py-0.5 rounded font-semibold">${escapeHtml(styleLabel)}</div>` : ''}
+        </div>
+        <div class="p-4">
+          <h3 class="font-bold text-sm mb-1 truncate">${escapeHtml(it.title || window.i18n.t('gallery.card.untitled'))}</h3>
+          <p class="text-xs text-white/40 mb-3">
+            ${formatSize(it.size || 0)} · ${formatDate(it.createdAt)}
+          </p>
+          <div class="flex items-center gap-2 text-xs">
+            <button class="btn-ghost text-xs flex-1 text-center" data-card-action="edit" data-id="${it.id}">
+              ✎ <span data-i18n="gallery.card.edit"></span>
+            </button>
+            <button class="btn-ghost text-xs flex-1 text-center" data-card-action="download" data-id="${it.id}">
+              ↓ <span data-i18n="gallery.card.download"></span>
+            </button>
+            <button class="btn-ghost text-xs flex-1 text-center text-red-400 hover:text-red-300" data-card-action="delete" data-id="${it.id}">
+              ✕ <span data-i18n="gallery.card.delete"></span>
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ===== 设置 =====
+  function renderSettings() {
+    const user = state.user || {};
+    const tutorials = window.TUTORIALS || [];
+    const completedCount = tutorials.filter((t) => state.tutorialProgress[t.id]).length;
+    const galleryCount = state.galleryItems.length;
+
+    return `
+      <section class="max-w-4xl mx-auto px-4 sm:px-6 py-12">
+        <div class="mb-8">
+          <h1 class="text-3xl md:text-4xl font-black mb-2" data-i18n="settings.title"></h1>
+          <p class="text-white/60" data-i18n="settings.subtitle"></p>
+        </div>
+
+        <!-- 个人信息 -->
+        <div class="glass-card p-6 mb-6">
+          <h3 class="text-lg font-bold mb-4" data-i18n="settings.profile.title"></h3>
+          <div class="grid sm:grid-cols-2 gap-4 text-sm">
+            <div>
+              <div class="text-xs text-white/40 mb-1" data-i18n="settings.username"></div>
+              <div>${escapeHtml(user.displayName || '访客')}</div>
+            </div>
+            <div>
+              <div class="text-xs text-white/40 mb-1" data-i18n="settings.email"></div>
+              <div>${escapeHtml(user.email || '—')}</div>
+            </div>
+            <div>
+              <div class="text-xs text-white/40 mb-1" data-i18n="settings.accountType"></div>
+              <div>${user.isGuest ? window.i18n.t('settings.accountTypeGuest') : window.i18n.t('settings.accountTypeUser')}</div>
+            </div>
+            <div>
+              <div class="text-xs text-white/40 mb-1" data-i18n="settings.profile.joinedAt"></div>
+              <div>${user.joinedAt ? formatDate(user.joinedAt) : '—'}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 统计 -->
+        <div class="glass-card p-6 mb-6">
+          <h3 class="text-lg font-bold mb-4" data-i18n="settings.stats"></h3>
+          <div class="grid grid-cols-3 gap-4">
+            <div class="text-center">
+              <div class="text-3xl font-black gradient-text">${completedCount}/${tutorials.length}</div>
+              <div class="text-xs text-white/60 mt-1" data-i18n="settings.stats.tutorialProgress"></div>
+            </div>
+            <div class="text-center">
+              <div class="text-3xl font-black gradient-text">${galleryCount}</div>
+              <div class="text-xs text-white/60 mt-1" data-i18n="settings.stats.galleryCount"></div>
+            </div>
+            <div class="text-center">
+              <div class="text-3xl font-black gradient-text">${state.workshopCalls}</div>
+              <div class="text-xs text-white/60 mt-1" data-i18n="settings.stats.workshopCount"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 偏好 -->
+        <div class="glass-card p-6 mb-6">
+          <h3 class="text-lg font-bold mb-4" data-i18n="settings.preferences.title"></h3>
+          <div class="space-y-4">
+            <div>
+              <div class="text-sm font-semibold mb-1" data-i18n="settings.preferences.ollamaUrl"></div>
+              <div class="text-xs text-white/60 mb-2" data-i18n="settings.preferences.ollamaUrlDesc"></div>
+              <input type="text" class="input-field text-sm" id="settings-ollama-url" value="${escapeHtml(state.ollamaUrl)}" />
+            </div>
+            <div class="flex items-center justify-between">
+              <div>
+                <div class="text-sm font-semibold" data-i18n="settings.preferences.language"></div>
+                <div class="text-xs text-white/60" data-i18n="settings.preferences.languageDesc"></div>
+              </div>
+              <div class="lang-toggle">
+                <button class="${state.lang === 'zh' ? 'active' : ''}" data-action="set-lang" data-lang="zh">中</button>
+                <button class="${state.lang === 'en' ? 'active' : ''}" data-action="set-lang" data-lang="en">EN</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 数据管理 -->
+        <div class="glass-card p-6">
+          <h3 class="text-lg font-bold mb-4" data-i18n="settings.dataManagement"></h3>
+          <div class="space-y-3">
+            <button class="btn-secondary text-sm w-full sm:w-auto" id="settings-export">
+              ↓ <span data-i18n="settings.exportGallery"></span>
+            </button>
+            <p class="text-xs text-white/40" data-i18n="settings.exportGalleryDesc"></p>
+
+            <hr class="border-white/10 my-4" />
+
+            <button class="btn-secondary text-sm w-full sm:w-auto border-red-500/40 text-red-400 hover:bg-red-500/10" id="settings-clear">
+              ✕ <span data-i18n="settings.clearLocalBtn"></span>
+            </button>
+            <p class="text-xs text-white/40" data-i18n="settings.clearLocalDesc"></p>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  // ===== 视图事件绑定 =====
+  function bindViewEvents() {
+    const root = document.getElementById('view-root');
+    if (!root) return;
+
+    // 教程列表卡片
+    root.querySelectorAll('[data-tutorial]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.activeTutorialId = el.getAttribute('data-tutorial');
+        render();
+      });
+    });
+
+    root.querySelectorAll('[data-action="back-to-tutorials"]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.activeTutorialId = null;
+        render();
+      });
+    });
+
+    root.querySelectorAll('[data-action="go-tutorial"]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const id = el.getAttribute('data-tutorial');
+        if (id) {
+          state.activeTutorialId = id;
+          render();
+        } else {
+          state.activeTutorialId = null;
+          render();
+        }
+      });
+    });
+
+    root.querySelectorAll('[data-action="toggle-tutorial-done"]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const id = el.getAttribute('data-tutorial');
+        state.tutorialProgress[id] = !state.tutorialProgress[id];
+        if (!state.tutorialProgress[id]) delete state.tutorialProgress[id];
+        saveState();
+        toast(state.tutorialProgress[id] ? window.i18n.t('tutorial.completed') + ' ✓' : '', 'success');
+        render();
+      });
+    });
+
+    // 复制代码
+    root.querySelectorAll('[data-copy-code]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const idx = parseInt(el.getAttribute('data-copy-code'), 10);
+        const tutorial = (window.TUTORIALS || []).find((t) => t.id === state.activeTutorialId);
+        if (!tutorial) return;
+        const content = tutorial[state.lang] || tutorial.zh;
+        const step = content.steps[idx];
+        if (step && step.content) {
+          copyToClipboard(step.content);
+          toast(window.i18n.t('common.copied'), 'success');
+        }
+      });
+    });
+
+    // 复制任意文本
+    root.querySelectorAll('[data-copy-text]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const text = decodeURIComponent(el.getAttribute('data-copy-text'));
+        copyToClipboard(text);
+        toast(window.i18n.t('common.copied'), 'success');
+      });
+    });
+
+    // ===== 工坊事件 =====
+    const ideaInput = root.querySelector('#workshop-idea');
+    if (ideaInput) {
+      ideaInput.addEventListener('input', (e) => { state.workshopIdea = e.target.value; });
+    }
+    root.querySelectorAll('[data-camera]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.workshopCamera = el.getAttribute('data-camera');
+        saveState();
+        render();
+      });
+    });
+    root.querySelectorAll('[data-style]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.workshopStyle = el.getAttribute('data-style');
+        saveState();
+        render();
+      });
+    });
+    const durationSlider = root.querySelector('#workshop-duration');
+    if (durationSlider) {
+      durationSlider.addEventListener('input', (e) => {
+        state.workshopDuration = parseInt(e.target.value, 10);
+        saveState();
+        // 只更新数字显示，不重渲染避免破坏拖拽
+        const label = durationSlider.parentElement.querySelector('span.text-\\[\\#00F0FF\\]');
+        if (label) label.textContent = state.workshopDuration;
+      });
+    }
+    root.querySelectorAll('[data-example]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.workshopIdea = window.i18n.t(`workshop.${el.getAttribute('data-example')}`);
+        render();
+      });
+    });
+
+    const enhanceBtn = root.querySelector('#enhance-btn');
+    if (enhanceBtn) enhanceBtn.addEventListener('click', handleEnhance);
+
+    const ollamaUrlInput = root.querySelector('#ollama-url');
+    if (ollamaUrlInput) {
+      ollamaUrlInput.addEventListener('change', async (e) => {
+        const newUrl = window.OllamaClient.setUrl(e.target.value);
+        state.ollamaUrl = newUrl;
+        await checkOllamaStatus();
+        render();
+      });
+    }
+    const ollamaRefresh = root.querySelector('#ollama-refresh');
+    if (ollamaRefresh) {
+      ollamaRefresh.addEventListener('click', async () => {
+        await checkOllamaStatus();
+        render();
+      });
+    }
+    const ollamaModelSelect = root.querySelector('#ollama-model');
+    if (ollamaModelSelect) {
+      ollamaModelSelect.addEventListener('change', (e) => {
+        state.ollamaSelectedModel = e.target.value;
+      });
+    }
+
+    // ===== 画廊事件 =====
+    const uploadBtn = root.querySelector('#gallery-upload-btn');
+    const fileInput = root.querySelector('#gallery-file-input');
+    if (uploadBtn && fileInput) {
+      uploadBtn.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', handleFileUpload);
+    }
+    // 拖拽上传
+    const gallerySection = root.querySelector('section');
+    if (gallerySection && state.view === 'gallery') {
+      ['dragover', 'dragenter'].forEach((evt) => {
+        gallerySection.addEventListener(evt, (e) => {
+          e.preventDefault();
+          gallerySection.classList.add('drag-active');
+        });
+      });
+      ['dragleave', 'drop'].forEach((evt) => {
+        gallerySection.addEventListener(evt, (e) => {
+          e.preventDefault();
+          gallerySection.classList.remove('drag-active');
+        });
+      });
+      gallerySection.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        const files = e.dataTransfer.files;
+        if (files && files.length) await handleFile(files[0]);
+      });
+    }
+
+    root.querySelectorAll('[data-gallery-filter]').forEach((el) => {
+      el.addEventListener('click', () => {
+        state.galleryFilter = el.getAttribute('data-gallery-filter');
+        render();
+      });
+    });
+    const searchInput = root.querySelector('#gallery-search');
+    if (searchInput) {
+      searchInput.addEventListener('input', (e) => {
+        state.gallerySearch = e.target.value;
+        // 防抖
+        clearTimeout(searchInput._t);
+        searchInput._t = setTimeout(() => render(), 300);
+      });
+    }
+    const sortSel = root.querySelector('#gallery-sort');
+    if (sortSel) {
+      sortSel.addEventListener('change', (e) => {
+        state.gallerySort = e.target.value;
+        render();
+      });
+    }
+
+    root.querySelectorAll('[data-card-action]').forEach((el) => {
+      el.addEventListener('click', () => handleCardAction(el.getAttribute('data-card-action'), el.getAttribute('data-id')));
+    });
+    root.querySelectorAll('[data-video-id]').forEach((el) => {
+      el.addEventListener('click', () => playVideo(el.getAttribute('data-video-id')));
+    });
+
+    // ===== 设置事件 =====
+    const setOllamaUrl = root.querySelector('#settings-ollama-url');
+    if (setOllamaUrl) {
+      setOllamaUrl.addEventListener('change', (e) => {
+        state.ollamaUrl = window.OllamaClient.setUrl(e.target.value);
+        toast('Ollama URL ✓', 'success');
+      });
+    }
+    const exportBtn = root.querySelector('#settings-export');
+    if (exportBtn) exportBtn.addEventListener('click', handleExportGallery);
+    const clearBtn = root.querySelector('#settings-clear');
+    if (clearBtn) clearBtn.addEventListener('click', handleClearLocal);
+  }
+
+  // ===== Ollama 状态检测 =====
+  async function checkOllamaStatus() {
+    state.ollamaStatus = 'checking';
+    try {
+      const result = await window.OllamaClient.checkStatus();
+      state.ollamaStatus = result.online ? 'online' : 'offline';
+      state.ollamaModels = result.models;
+      if (result.models.length && !state.ollamaSelectedModel) {
+        // 优先选 llama3.2 或 qwen2.5
+        const preferred = result.models.find((m) => m.includes('llama3.2')) || result.models[0];
+        state.ollamaSelectedModel = preferred;
+      }
+    } catch (e) {
+      state.ollamaStatus = 'offline';
+      state.ollamaModels = [];
+    }
+  }
+
+  // ===== 工坊：增强提示词 =====
+  async function handleEnhance() {
+    const idea = state.workshopIdea.trim();
+    if (!idea) {
+      toast(state.lang === 'zh' ? '请输入你的创意想法' : 'Please enter your creative idea', 'error');
+      return;
+    }
+    state.workshopEnhancing = true;
+    render();
+    try {
+      let fullPrompt;
+      let usedOllama = false;
+      if (state.ollamaStatus === 'online' && state.ollamaSelectedModel) {
+        try {
+          fullPrompt = await window.OllamaClient.enhanceVideoPrompt(idea, state.ollamaSelectedModel, {
+            camera: state.workshopCamera,
+            duration: state.workshopDuration,
+            style: state.workshopStyle,
+          });
+          usedOllama = true;
+        } catch (e) {
+          console.warn('[Workshop] Ollama generate failed, fallback:', e);
+          fullPrompt = generateFallbackPrompt(idea);
+          toast(window.i18n.t('error.ollamaGenerate'), 'error');
+        }
+      } else {
+        fullPrompt = generateFallbackPrompt(idea);
+      }
+
+      // 始终生成结构化工单（用内置规则）
+      const workOrder = window.WorkOrder.generateWorkOrder({
+        prompt: idea,
+        mode: 'text-to-video',
+        cameraMovement: state.workshopCamera,
+        duration: state.workshopDuration,
+        styles: [state.workshopStyle],
+        hasImage: false,
+      }, state.lang);
+
+      state.workshopResult = { fullPrompt, workOrder };
+      state.workshopCalls += 1;
+      saveState();
+      toast(usedOllama ? '✨ Ollama 增强 ✓' : '✓', 'success');
+    } catch (e) {
+      console.error('[Workshop] enhance failed:', e);
+      toast(window.i18n.t('error.generic'), 'error');
+    } finally {
+      state.workshopEnhancing = false;
+      render();
+    }
+  }
+
+  // 内置规则增强（无 Ollama 时降级使用）
+  function generateFallbackPrompt(idea) {
+    const lang = state.lang;
+    const styleDesc = {
+      cinematic: lang === 'zh' ? 'cinematic color grading, warm tones, shallow depth of field' : 'cinematic color grading, warm tones, shallow depth of field',
+      cyberpunk: 'cyberpunk aesthetic, neon glow, high-contrast cool/warm palette',
+      ink: 'ink wash style, monochrome, generous negative space',
+      anime: 'anime style, vivid colors, flat outlines',
+      realistic: 'photorealistic, natural lighting, high detail',
+      fantasy: 'fantasy aesthetic, dreamy halation, surreal palette',
+      watercolor: 'watercolor texture, soft bleed, paper grain',
+    }[state.workshopStyle] || 'cinematic';
+
+    const cameraDesc = {
+      push: 'medium shot, slow push-in',
+      pull: 'medium close-up, gradual pull-back',
+      pan: 'wide shot, horizontal pan',
+      tilt: 'medium shot, vertical tilt',
+      random: 'multi-angle mixed camera movement',
+    }[state.workshopCamera] || 'medium shot';
+
+    if (lang === 'zh') {
+      return `${idea}。镜头采用${cameraDesc}，画面风格${styleDesc}。视频时长约 ${state.workshopDuration} 秒，4K 分辨率，24fps，高细节，流畅运动，专业电影质感。`;
+    }
+    return `${idea}. The camera uses ${cameraDesc}, visual style ${styleDesc}. Video duration approximately ${state.workshopDuration} seconds, 4K resolution, 24fps, high detail, smooth motion, professional cinematography.`;
+  }
+
+  // ===== 文件上传 =====
+  async function handleFileUpload(e) {
+    const file = e.target.files && e.target.files[0];
+    if (file) await handleFile(file);
+    e.target.value = '';
+  }
+
+  async function handleFile(file) {
+    const validTypes = ['video/mp4', 'video/webm', 'video/quicktime'];
+    if (!validTypes.includes(file.type)) {
+      toast(window.i18n.t('gallery.invalidFormat'), 'error');
+      return;
+    }
+    const maxSize = 200 * 1024 * 1024; // 200MB
+    if (file.size > maxSize) {
+      toast(window.i18n.t('gallery.fileTooLarge'), 'error');
+      return;
+    }
+
+    toast(window.i18n.t('gallery.uploading'), 'info');
+    try {
+      const duration = await getVideoDuration(file);
+      const meta = {
+        title: file.name.replace(/\.[^.]+$/, ''),
+        description: '',
+        style: '',
+        prompt: '',
+        duration,
+      };
+      const id = await window.GalleryDB.addVideo(meta, file);
+      await loadGallery();
+      toast(window.i18n.t('gallery.uploadSuccess'), 'success');
+      render();
+    } catch (e) {
+      console.error('[Gallery] upload failed:', e);
+      if (e && e.name === 'QuotaExceededError') {
+        toast(window.i18n.t('error.dbQuota'), 'error');
+      } else {
+        toast(window.i18n.t('gallery.uploadFailed'), 'error');
+      }
+    }
+  }
+
+  function getVideoDuration(file) {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(file);
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.onloadedmetadata = () => {
+        URL.revokeObjectURL(url);
+        resolve(video.duration || 0);
+      };
+      video.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(0);
+      };
+      video.src = url;
+    });
+  }
+
+  // ===== 画廊卡片操作 =====
+  async function handleCardAction(action, id) {
+    if (action === 'delete') {
+      const sure = confirm(window.i18n.t('gallery.card.confirmDelete'));
+      if (!sure) return;
+      try {
+        await window.GalleryDB.deleteVideo(id);
+        await loadGallery();
+        toast('✓', 'success');
+        render();
+      } catch (e) {
+        toast(window.i18n.t('error.generic'), 'error');
+      }
+    } else if (action === 'download') {
+      try {
+        const blob = await window.GalleryDB.getVideoBlob(id);
+        if (!blob) { toast(window.i18n.t('error.generic'), 'error'); return; }
+        const item = state.galleryItems.find((i) => i.id === id);
+        const ext = (item && item.type && item.type.split('/')[1]) || 'mp4';
+        const filename = (item && item.title) || 'video';
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${filename}.${ext}`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (e) {
+        toast(window.i18n.t('error.generic'), 'error');
+      }
+    } else if (action === 'edit') {
+      openEditModal(id);
+    }
+  }
+
+  function openEditModal(id) {
+    const item = state.galleryItems.find((i) => i.id === id);
+    if (!item) return;
+    const modalRoot = document.getElementById('modal-root');
+    const styleOptions = ['', 'cinematic', 'cyberpunk', 'ink', 'anime', 'realistic', 'fantasy', 'watercolor']
+      .map((s) => {
+        const label = s === '' ? '—' : window.i18n.t(`workshop.style.${s}`);
+        return `<option value="${s}" ${item.style === s ? 'selected' : ''}>${label}</option>`;
+      }).join('');
+
+    modalRoot.innerHTML = `
+      <div class="modal-overlay" id="edit-overlay">
+        <div class="modal-content">
+          <h2 class="text-xl font-bold mb-4" data-i18n="gallery.editModal.title"></h2>
+          <div class="space-y-4">
+            <div>
+              <label class="block text-xs text-white/60 mb-1" data-i18n="gallery.editModal.videoTitle"></label>
+              <input type="text" class="input-field" id="edit-title" value="${escapeHtml(item.title || '')}" />
+            </div>
+            <div>
+              <label class="block text-xs text-white/60 mb-1" data-i18n="gallery.editModal.description"></label>
+              <textarea class="input-field" id="edit-desc" rows="3">${escapeHtml(item.description || '')}</textarea>
+            </div>
+            <div>
+              <label class="block text-xs text-white/60 mb-1" data-i18n="gallery.editModal.style"></label>
+              <select class="input-field" id="edit-style">${styleOptions}</select>
+            </div>
+            <div>
+              <label class="block text-xs text-white/60 mb-1" data-i18n="gallery.editModal.prompt"></label>
+              <textarea class="input-field" id="edit-prompt" rows="4">${escapeHtml(item.prompt || '')}</textarea>
+            </div>
+          </div>
+          <div class="flex gap-3 mt-6">
+            <button class="btn-secondary flex-1" id="edit-cancel" data-i18n="common.cancel"></button>
+            <button class="btn-primary flex-1" id="edit-save" data-i18n="gallery.editModal.save"></button>
+          </div>
+        </div>
+      </div>
+    `;
+    window.i18n.applyTranslations(modalRoot);
+
+    modalRoot.querySelector('#edit-cancel').addEventListener('click', () => { modalRoot.innerHTML = ''; });
+    modalRoot.querySelector('#edit-overlay').addEventListener('click', (e) => {
+      if (e.target.id === 'edit-overlay') modalRoot.innerHTML = '';
+    });
+    modalRoot.querySelector('#edit-save').addEventListener('click', async () => {
+      const patch = {
+        title: modalRoot.querySelector('#edit-title').value.trim(),
+        description: modalRoot.querySelector('#edit-desc').value.trim(),
+        style: modalRoot.querySelector('#edit-style').value,
+        prompt: modalRoot.querySelector('#edit-prompt').value.trim(),
+      };
+      try {
+        await window.GalleryDB.updateMeta(id, patch);
+        await loadGallery();
+        modalRoot.innerHTML = '';
+        toast('✓', 'success');
+        render();
+      } catch (e) {
+        toast(window.i18n.t('error.generic'), 'error');
       }
     });
   }
 
-  async function startVideoGeneration(taskId, params) {
-    const task = state.tasks.find((t) => t.id === taskId);
-    if (!task) return;
-    task.status = 'processing';
-    task.progress = 0;
-    render();
-
+  async function playVideo(id) {
     try {
-      // 模拟进度
-      const totalDuration = Math.min(8000, 3000 + params.duration * 500);
-      const startTime = Date.now();
-      let lastProgress = 0;
-
-      await new Promise((resolve) => {
-        const tick = () => {
-          const elapsed = Date.now() - startTime;
-          const ratio = Math.min(1, elapsed / totalDuration);
-          const progress = Math.round((1 - Math.pow(1 - ratio, 2)) * 100);
-          if (progress !== lastProgress) {
-            lastProgress = progress;
-            task.progress = Math.min(99, progress);
-            render();
-          }
-          if (ratio < 1) {
-            setTimeout(tick, 200);
-          } else {
-            resolve();
-          }
-        };
-        setTimeout(tick, 500);
+      const blob = await window.GalleryDB.getVideoBlob(id);
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const item = state.galleryItems.find((i) => i.id === id);
+      const modalRoot = document.getElementById('modal-root');
+      modalRoot.innerHTML = `
+        <div class="modal-overlay" id="play-overlay" style="align-items: center;">
+          <div class="modal-content" style="max-width: 900px; padding: 16px;">
+            <video src="${url}" controls autoplay class="w-full rounded-lg" style="max-height: 80vh;"></video>
+            <div class="flex items-center justify-between mt-3 px-2">
+              <h3 class="font-bold text-sm truncate">${escapeHtml(item ? item.title : '')}</h3>
+              <button class="btn-ghost text-sm" id="play-close" data-i18n="common.close"></button>
+            </div>
+          </div>
+        </div>
+      `;
+      modalRoot.querySelector('#play-close').addEventListener('click', () => {
+        URL.revokeObjectURL(url);
+        modalRoot.innerHTML = '';
       });
-
-      // 生成缩略图
-      task.progress = 100;
-      task.thumbnailDataUrl = await generateThumbnail(params);
-      task.status = 'completed';
-      state.totalGenerated += 1;
-      if (state.user) updateCredits(state.user.uid, { totalGenerated: state.totalGenerated });
-      saveState();
-      render();
-      toast(window.i18n.t('task.completed'), 'success');
-    } catch (err) {
-      console.error('[Generation] 失败：', err);
-      task.status = 'failed';
-      task.error = err.message || 'Unknown error';
-      // 退回积分
-      state.credits += 1;
-      if (state.user) updateCredits(state.user.uid, { credits: state.credits });
-      saveState();
-      render();
+      modalRoot.querySelector('#play-overlay').addEventListener('click', (e) => {
+        if (e.target.id === 'play-overlay') {
+          URL.revokeObjectURL(url);
+          modalRoot.innerHTML = '';
+        }
+      });
+    } catch (e) {
       toast(window.i18n.t('error.generic'), 'error');
     }
   }
 
-  function handleGenerate() {
-    const mode = state.activeTab;
-    const prompt = mode === 'text-to-video' ? state.ttvPrompt : state.itvPrompt;
-    if (!prompt || !prompt.trim()) {
-      toast(mode === 'text-to-video' ? window.i18n.t('ttv.promptPlaceholder') : window.i18n.t('itv.promptPlaceholder'), 'error');
-      return;
+  // ===== 设置：导出 =====
+  async function handleExportGallery() {
+    try {
+      const items = await window.GalleryDB.getAllMeta();
+      const exportData = items.map((it) => ({
+        id: it.id,
+        title: it.title,
+        description: it.description,
+        style: it.style,
+        prompt: it.prompt,
+        duration: it.duration,
+        size: it.size,
+        type: it.type,
+        createdAt: it.createdAt,
+        createdAtFormatted: new Date(it.createdAt).toISOString(),
+      }));
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `vzong-gallery-${Date.now()}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast('✓', 'success');
+    } catch (e) {
+      toast(window.i18n.t('error.generic'), 'error');
     }
-    if (mode === 'image-to-video' && !state.itvImage) {
-      toast(window.i18n.t('itv.uploadHint'), 'error');
-      return;
-    }
-    if (!deductCredit()) return;
-
-    updateWorkOrder();
-    const taskId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const params = {
-      mode,
-      prompt,
-      imageDataUrl: mode === 'image-to-video' ? state.itvImage : null,
-      cameraMovement: state.cameraMovement,
-      duration: state.duration,
-      styles: [...state.styles],
-    };
-    const task = {
-      id: taskId,
-      params,
-      status: 'queued',
-      progress: 0,
-      createdAt: Date.now(),
-      workOrder: state.currentWorkOrder,
-    };
-    state.tasks.unshift(task);
-    saveState();
-    render();
-    startVideoGeneration(taskId, params);
   }
 
-  function downloadTask(taskId) {
-    const task = state.tasks.find((t) => t.id === taskId);
-    if (!task || !task.thumbnailDataUrl) return;
-    const link = document.createElement('a');
-    link.href = task.thumbnailDataUrl;
-    link.download = `vzong-${taskId}.png`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  }
-
-  function deleteTask(taskId) {
-    state.tasks = state.tasks.filter((t) => t.id !== taskId);
-    saveState();
-    render();
-  }
-
-  // ===== 渲染：导航栏 =====
-  function renderNav() {
-    const t = window.i18n.t;
-    const user = state.user;
-    return `
-      <nav class="fixed top-0 left-0 right-0 z-40 backdrop-blur-xl bg-[#0A1128]/80 border-b border-[rgba(0,240,255,0.1)]">
-        <div class="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
-          <a href="#" onclick="window.vzongApp.navigate('landing'); return false;" class="flex items-center gap-2 group">
-            <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-[#00F0FF] to-[#0080FF] flex items-center justify-center font-bold text-[#0A1128] text-lg group-hover:scale-110 transition-transform">V</div>
-            <div class="flex items-baseline">
-              <span class="text-xl font-bold gradient-text">${t('brand.name')}</span>
-              <span class="text-xs text-white/40 ml-1 hidden sm:inline">${t('brand.suffix')}</span>
-            </div>
-          </a>
-
-          <div class="hidden md:flex items-center gap-1">
-            ${state.view !== 'landing' ? `
-              <button onclick="window.vzongApp.navigate('dashboard')" class="px-4 py-2 rounded-lg text-sm ${state.view==='dashboard'?'text-[#00F0FF] bg-[rgba(0,240,255,0.1)]':'text-white/60 hover:text-white hover:bg-white/5'} transition-all">${t('nav.studio')}</button>
-              <button onclick="window.vzongApp.navigate('gallery')" class="px-4 py-2 rounded-lg text-sm ${state.view==='gallery'?'text-[#00F0FF] bg-[rgba(0,240,255,0.1)]':'text-white/60 hover:text-white hover:bg-white/5'} transition-all">${t('nav.gallery')}</button>
-              <button onclick="window.vzongApp.navigate('settings')" class="px-4 py-2 rounded-lg text-sm ${state.view==='settings'?'text-[#00F0FF] bg-[rgba(0,240,255,0.1)]':'text-white/60 hover:text-white hover:bg-white/5'} transition-all">${t('nav.settings')}</button>
-            ` : ''}
-          </div>
-
-          <div class="flex items-center gap-3">
-            <div class="lang-toggle">
-              <button onclick="window.vzongApp.setLang('zh')" class="${state.lang==='zh'?'active':''}">中</button>
-              <button onclick="window.vzongApp.setLang('en')" class="${state.lang==='en'?'active':''}">EN</button>
-            </div>
-            ${user ? `
-              <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[rgba(0,240,255,0.1)] border border-[rgba(0,240,255,0.2)]">
-                <span class="text-xs text-white/60">${t('common.credits')}:</span>
-                <span class="text-sm font-bold text-[#00F0FF]">${state.credits}</span>
-              </div>
-              <button onclick="window.vzongApp.openCreditsDialog()" class="btn-ghost text-sm">${t('common.recharge')}</button>
-              <button onclick="window.vzongApp.logout()" class="btn-ghost text-sm hidden sm:block">${t('nav.logout')}</button>
-            ` : `
-              <button onclick="window.vzongApp.openLoginDialog()" class="btn-primary text-sm">${t('nav.login')}</button>
-            `}
-          </div>
-        </div>
-      </nav>
-    `;
-  }
-
-  // ===== 渲染：Landing 页 =====
-  function renderLanding() {
-    const t = window.i18n.t;
-    return `
-      <div class="relative min-h-screen pt-20 overflow-hidden">
-        <div class="hero-bg"></div>
-        <div class="hero-glow" style="top: -200px; left: 50%; transform: translateX(-50%);"></div>
-
-        <div class="relative max-w-6xl mx-auto px-6 py-16 md:py-24 text-center">
-          <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-[rgba(0,240,255,0.1)] border border-[rgba(0,240,255,0.3)] mb-8 float-up">
-            <span class="text-xs font-bold text-[#00F0FF]">${t('landing.badgeNew')}</span>
-            <span class="text-sm text-white/80">${t('landing.badge')}</span>
-          </div>
-
-          <h1 class="text-5xl md:text-7xl font-bold mb-6 leading-tight float-up" style="animation-delay: 0.1s">
-            <span class="block">${t('landing.titleLine1')}</span>
-            <span class="block gradient-text">${t('landing.titleLine2')}</span>
-          </h1>
-
-          <p class="text-lg md:text-xl text-white/60 max-w-3xl mx-auto mb-10 float-up" style="animation-delay: 0.2s">
-            ${t('landing.subtitle')}
-          </p>
-
-          <div class="flex flex-col sm:flex-row gap-4 justify-center items-center mb-16 float-up" style="animation-delay: 0.3s">
-            <button onclick="window.vzongApp.startCreating()" class="btn-primary text-base px-8 py-4 pulse-glow">
-              ${t('landing.ctaPrimary')} →
-            </button>
-            <button onclick="window.vzongApp.navigate('gallery')" class="btn-secondary text-base px-8 py-4">
-              ${t('landing.ctaSecondary')}
-            </button>
-          </div>
-
-          <!-- 统计数据 -->
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-6 max-w-4xl mx-auto mb-20 float-up" style="animation-delay: 0.4s">
-            ${[
-              { label: t('landing.statsVideos'), value: '12,847' },
-              { label: t('landing.statsUsers'), value: '3,521' },
-              { label: t('landing.statsStyles'), value: '7' },
-              { label: t('landing.statsSatisfaction'), value: '98%' },
-            ].map(s => `
-              <div class="glass-card p-6">
-                <div class="text-3xl font-bold gradient-text mb-1">${s.value}</div>
-                <div class="text-sm text-white/60">${s.label}</div>
-              </div>
-            `).join('')}
-          </div>
-
-          <!-- 功能卡片 -->
-          <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-6 mb-20">
-            ${[
-              { icon: '✍️', title: t('landing.feature1Title'), desc: t('landing.feature1Desc') },
-              { icon: '🖼️', title: t('landing.feature2Title'), desc: t('landing.feature2Desc') },
-              { icon: '📋', title: t('landing.feature3Title'), desc: t('landing.feature3Desc') },
-              { icon: '🎨', title: t('landing.feature4Title'), desc: t('landing.feature4Desc') },
-            ].map((f, i) => `
-              <div class="glass-card glass-card-hover p-6 text-left float-up" style="animation-delay: ${0.1 * i}s">
-                <div class="text-4xl mb-4">${f.icon}</div>
-                <h3 class="text-lg font-bold mb-2">${f.title}</h3>
-                <p class="text-sm text-white/60 leading-relaxed">${f.desc}</p>
-              </div>
-            `).join('')}
-          </div>
-
-          <!-- 示例画廊 -->
-          <div class="mb-20">
-            <h2 class="text-3xl font-bold mb-2">${t('landing.exampleTitle')}</h2>
-            <p class="text-white/60 mb-8">${t('landing.exampleDesc')}</p>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-              ${[1,2,3,4].map(i => `
-                <div class="task-card aspect-video relative overflow-hidden">
-                  <div class="absolute inset-0 bg-gradient-to-br from-[#00F0FF]/20 via-[#0A1128] to-[#FF00FF]/20"></div>
-                  <div class="absolute inset-0 flex items-center justify-center">
-                    <div class="w-12 h-12 rounded-full bg-[#00F0FF]/90 flex items-center justify-center">
-                      <div class="w-0 h-0 border-l-[12px] border-l-[#0A1128] border-y-[8px] border-y-transparent ml-1"></div>
-                    </div>
-                  </div>
-                  <div class="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/80 to-transparent">
-                    <div class="text-xs text-white/80">${i === 1 ? '赛博朋克' : i === 2 ? '电影感' : i === 3 ? '水墨风' : '动漫'} · ${5 + i * 2}s</div>
-                  </div>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-
-          <!-- CTA -->
-          <div class="glass-card p-10 md:p-16 text-center pulse-glow">
-            <h2 class="text-3xl md:text-4xl font-bold mb-4">${t('landing.titleLine2')}</h2>
-            <p class="text-white/60 mb-8">${t('landing.subtitle')}</p>
-            <button onclick="window.vzongApp.startCreating()" class="btn-primary text-base px-8 py-4">
-              ${t('landing.ctaPrimary')} →
-            </button>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  // ===== 渲染：Dashboard =====
-  function renderDashboard() {
-    const t = window.i18n.t;
-    return `
-      <div class="pt-20 min-h-screen max-w-7xl mx-auto px-6 py-8">
-        <div class="mb-8">
-          <h1 class="text-3xl font-bold mb-2">
-            ${t('dashboard.welcome')}${state.user ? '，' + (state.user.displayName || 'Creator') : ''}
-          </h1>
-          <div class="flex items-center gap-4 text-sm text-white/60">
-            <span>${t('dashboard.creditsBalance')}: <span class="text-[#00F0FF] font-bold">${state.credits}</span> ${t('common.creditsUnit')}</span>
-            <span>·</span>
-            <span>${t('dashboard.creditsHint')}</span>
-          </div>
-        </div>
-
-        <!-- Tab 切换 -->
-        <div class="flex gap-2 mb-6 p-1 rounded-xl bg-[rgba(0,0,0,0.3)] border border-[rgba(0,240,255,0.1)] w-fit">
-          <button onclick="window.vzongApp.setTab('text-to-video')" class="px-6 py-2 rounded-lg text-sm font-semibold transition-all ${state.activeTab==='text-to-video'?'bg-[#00F0FF] text-[#0A1128]':'text-white/60 hover:text-white'}">
-            ${t('dashboard.tab.textToVideo')}
-          </button>
-          <button onclick="window.vzongApp.setTab('image-to-video')" class="px-6 py-2 rounded-lg text-sm font-semibold transition-all ${state.activeTab==='image-to-video'?'bg-[#00F0FF] text-[#0A1128]':'text-white/60 hover:text-white'}">
-            ${t('dashboard.tab.imageToVideo')}
-          </button>
-        </div>
-
-        <div class="grid lg:grid-cols-3 gap-6">
-          <!-- 输入区 -->
-          <div class="lg:col-span-2 glass-card p-6">
-            ${state.activeTab === 'text-to-video' ? renderTextToVideo() : renderImageToVideo()}
-          </div>
-
-          <!-- 工单区 -->
-          <div class="glass-card p-6">
-            ${renderWorkOrder()}
-          </div>
-        </div>
-
-        <!-- 高级设置 -->
-        <div class="glass-card mt-6 overflow-hidden">
-          <button onclick="window.vzongApp.toggleAdvanced()" class="w-full p-5 flex items-center justify-between hover:bg-white/5 transition-colors">
-            <div class="flex items-center gap-3">
-              <span class="text-xl">⚙️</span>
-              <span class="font-semibold">${t('advanced.title')}</span>
-            </div>
-            <span class="text-white/60 transition-transform ${state.advancedOpen?'rotate-180':''}">▼</span>
-          </button>
-          <div class="collapsible-content ${state.advancedOpen?'open':''}">
-            <div class="p-5 pt-0 grid md:grid-cols-3 gap-6 border-t border-[rgba(0,240,255,0.1)]">
-              <!-- 运镜 -->
-              <div>
-                <label class="text-sm text-white/60 mb-2 block">${t('advanced.camera')}</label>
-                <select class="input-field" onchange="window.vzongApp.setCamera(this.value)">
-                  <option value="push" ${state.cameraMovement==='push'?'selected':''}>${t('advanced.camera.push')}</option>
-                  <option value="pull" ${state.cameraMovement==='pull'?'selected':''}>${t('advanced.camera.pull')}</option>
-                  <option value="pan" ${state.cameraMovement==='pan'?'selected':''}>${t('advanced.camera.pan')}</option>
-                  <option value="tilt" ${state.cameraMovement==='tilt'?'selected':''}>${t('advanced.camera.tilt')}</option>
-                  <option value="random" ${state.cameraMovement==='random'?'selected':''}>${t('advanced.camera.random')}</option>
-                </select>
-              </div>
-              <!-- 时长 -->
-              <div>
-                <label class="text-sm text-white/60 mb-2 block flex justify-between">
-                  <span>${t('advanced.duration')}</span>
-                  <span class="text-[#00F0FF] font-bold">${state.duration}${t('advanced.durationValue')}</span>
-                </label>
-                <input type="range" min="5" max="15" value="${state.duration}" oninput="window.vzongApp.setDuration(parseInt(this.value))" />
-                <div class="flex justify-between text-xs text-white/40 mt-1">
-                  <span>5s</span><span>10s</span><span>15s</span>
-                </div>
-              </div>
-              <!-- 风格 -->
-              <div>
-                <label class="text-sm text-white/60 mb-2 block">${t('advanced.style')}</label>
-                <div class="flex flex-wrap gap-2">
-                  ${['cinematic','cyberpunk','ink','anime','realistic','fantasy','watercolor'].map(s => `
-                    <button onclick="window.vzongApp.toggleStyle('${s}')" class="capsule-btn ${state.styles.includes(s)?'active':''}">
-                      ${t('advanced.style.'+s)}
-                    </button>
-                  `).join('')}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 最近任务 -->
-        <div class="mt-8">
-          <h2 class="text-xl font-bold mb-4">${t('dashboard.recentTasks')}</h2>
-          ${state.tasks.length === 0
-            ? `<div class="glass-card p-12 text-center text-white/40">${t('dashboard.noTasks')}</div>`
-            : `<div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">${state.tasks.slice(0, 6).map(renderTaskCard).join('')}</div>`
-          }
-        </div>
-      </div>
-    `;
-  }
-
-  function renderTextToVideo() {
-    const t = window.i18n.t;
-    return `
-      <div>
-        <label class="block text-sm text-white/60 mb-2">${t('ttv.promptLabel')}</label>
-        <textarea
-          class="input-field"
-          placeholder="${t('ttv.promptPlaceholder')}"
-          oninput="window.vzongApp.setTTVPrompt(this.value)"
-        >${state.ttvPrompt}</textarea>
-        <div class="flex items-center justify-between mt-4">
-          <span class="text-xs text-white/40">${t('ttv.generateHint')}</span>
-          <button onclick="window.vzongApp.generate()" class="btn-primary">
-            ${t('ttv.generate')} ✨
-          </button>
-        </div>
-      </div>
-    `;
-  }
-
-  function renderImageToVideo() {
-    const t = window.i18n.t;
-    return `
-      <div class="grid md:grid-cols-2 gap-4">
-        <!-- 图片上传 -->
-        <div>
-          <label class="block text-sm text-white/60 mb-2">${t('itv.uploadTitle')}</label>
-          <div
-            class="upload-zone ${state.itvImage?'has-image':''}"
-            onclick="document.getElementById('image-input').click()"
-            ondragover="event.preventDefault(); this.classList.add('dragover')"
-            ondragleave="this.classList.remove('dragover')"
-            ondrop="event.preventDefault(); this.classList.remove('dragover'); if(event.dataTransfer.files[0]) window.vzongApp.uploadImage(event.dataTransfer.files[0])"
-          >
-            ${state.itvImage
-              ? `<img src="${state.itvImage}" alt="uploaded" />
-                 <button onclick="event.stopPropagation(); document.getElementById('image-input').click()" class="btn-ghost text-xs mt-2">${t('itv.changeImage')}</button>`
-              : `<div>
-                   <div class="text-4xl mb-2">📷</div>
-                   <div class="text-sm text-white/60 mb-1">${t('itv.uploadHint')}</div>
-                   <div class="text-xs text-white/40">${t('itv.uploadFormats')}</div>
-                 </div>`
-            }
-          </div>
-          <input id="image-input" type="file" accept="image/jpeg,image/png" class="hidden" onchange="if(this.files[0]) window.vzongApp.uploadImage(this.files[0])" />
-        </div>
-
-        <!-- 文字指令 -->
-        <div>
-          <label class="block text-sm text-white/60 mb-2">${t('itv.promptLabel')}</label>
-          <textarea
-            class="input-field"
-            placeholder="${t('itv.promptPlaceholder')}"
-            oninput="window.vzongApp.setITVPrompt(this.value)"
-          >${state.itvPrompt}</textarea>
-
-          <!-- 示例 -->
-          <div class="mt-3">
-            <div class="text-xs text-white/40 mb-2">${t('itv.examples')}:</div>
-            <div class="flex flex-wrap gap-2">
-              <button onclick="window.vzongApp.setITVPrompt('${t('itv.example1')}')" class="capsule-btn text-xs">
-                💃 ${t('itv.example1')}
-              </button>
-              <button onclick="window.vzongApp.setITVPrompt('${t('itv.example2')}')" class="capsule-btn text-xs">
-                🦋 ${t('itv.example2')}
-              </button>
-              <button onclick="window.vzongApp.setITVPrompt('${t('itv.example3')}')" class="capsule-btn text-xs">
-                🎤 ${t('itv.example3')}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="flex items-center justify-between mt-4 pt-4 border-t border-[rgba(0,240,255,0.1)]">
-        <span class="text-xs text-white/40">${t('ttv.generateHint')}</span>
-        <button onclick="window.vzongApp.generate()" class="btn-primary">
-          ${t('itv.generate')} ✨
-        </button>
-      </div>
-    `;
-  }
-
-  function renderWorkOrder() {
-    const t = window.i18n.t;
-    const wo = state.currentWorkOrder;
-    if (!wo) {
-      return `
-        <div class="text-center py-8">
-          <div class="text-4xl mb-3 opacity-50">📋</div>
-          <div class="text-sm text-white/40">${t('workorder.desc')}</div>
-        </div>
-      `;
-    }
-    return `
-      <div>
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="font-bold flex items-center gap-2">
-            <span>📋</span>
-            <span>${t('workorder.title')}</span>
-          </h3>
-          <button onclick="window.vzongApp.copyWorkOrder()" class="btn-ghost text-xs">
-            📋 ${t('workorder.copyAll')}
-          </button>
-        </div>
-        <p class="text-xs text-white/40 mb-4">${t('workorder.desc')}</p>
-        <div class="space-y-3">
-          ${[
-            { key: 'subject', icon: '👤', label: t('workorder.subject') },
-            { key: 'scene', icon: '🏞️', label: t('workorder.scene') },
-            { key: 'action', icon: '🏃', label: t('workorder.action') },
-            { key: 'camera', icon: '🎥', label: t('workorder.camera') },
-            { key: 'style', icon: '🎨', label: t('workorder.style') },
-            { key: 'constraints', icon: '✅', label: t('workorder.constraints') },
-          ].map(item => `
-            <div class="bg-[rgba(0,0,0,0.3)] rounded-lg p-3 border border-[rgba(0,240,255,0.1)]">
-              <div class="flex items-center gap-2 text-xs text-[#00F0FF] mb-1">
-                <span>${item.icon}</span>
-                <span class="font-semibold">${item.label}</span>
-              </div>
-              <div class="text-sm text-white/80 leading-relaxed">${wo[item.key]}</div>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
-  }
-
-  function renderTaskCard(task) {
-    const t = window.i18n.t;
-    const statusColors = {
-      queued: 'text-yellow-400 bg-yellow-400/10',
-      processing: 'text-[#00F0FF] bg-[#00F0FF]/10',
-      completed: 'text-green-400 bg-green-400/10',
-      failed: 'text-red-400 bg-red-400/10',
-    };
-    const statusLabels = {
-      queued: t('task.queued'),
-      processing: t('task.processing'),
-      completed: t('task.completed'),
-      failed: t('task.failed'),
-    };
-    return `
-      <div class="task-card fade-in">
-        <div class="aspect-video bg-[#0A1128] relative overflow-hidden">
-          ${task.thumbnailDataUrl
-            ? `<img src="${task.thumbnailDataUrl}" alt="thumbnail" class="w-full h-full object-cover" />`
-            : `<div class="w-full h-full flex items-center justify-center">
-                 <div class="w-10 h-10 rounded-full border-4 border-[#00F0FF]/20 border-t-[#00F0FF] animate-spin"></div>
-               </div>`
-          }
-          <div class="absolute top-2 right-2 px-2 py-1 rounded-md text-xs font-bold ${statusColors[task.status]}">
-            ${statusLabels[task.status]}${task.status==='processing'?' '+task.progress+'%':''}
-          </div>
-        </div>
-        <div class="p-4">
-          <div class="text-sm text-white/80 mb-2 line-clamp-2">${task.params.prompt || '(no prompt)'}</div>
-          <div class="flex items-center justify-between text-xs text-white/40 mb-3">
-            <span>${task.params.duration}s · ${(task.params.styles||[]).join(', ')||'default'}</span>
-            <span>${new Date(task.createdAt).toLocaleTimeString()}</span>
-          </div>
-          ${task.status==='processing'
-            ? `<div class="progress-bar"><div class="progress-bar-fill" style="width:${task.progress}%"></div></div>`
-            : `<div class="flex gap-2">
-                 ${task.status==='completed' ? `<button onclick="window.vzongApp.downloadTask('${task.id}')" class="btn-ghost text-xs flex-1">⬇️ ${t('task.download')}</button>` : ''}
-                 ${task.status==='failed' ? `<button onclick="window.vzongApp.retryTask('${task.id}')" class="btn-ghost text-xs flex-1">🔄 ${t('task.retry')}</button>` : ''}
-                 <button onclick="window.vzongApp.deleteTask('${task.id}')" class="btn-ghost text-xs">🗑️</button>
-               </div>`
-          }
-        </div>
-      </div>
-    `;
-  }
-
-  // ===== 渲染：Gallery =====
-  function renderGallery() {
-    const t = window.i18n.t;
-    return `
-      <div class="pt-20 min-h-screen max-w-7xl mx-auto px-6 py-8">
-        <div class="flex items-center justify-between mb-6">
-          <h1 class="text-3xl font-bold">${t('nav.gallery')}</h1>
-          <button onclick="window.vzongApp.navigate('dashboard')" class="btn-secondary text-sm">+ ${t('dashboard.tab.textToVideo')}</button>
-        </div>
-        ${state.tasks.length === 0
-          ? `<div class="glass-card p-16 text-center">
-               <div class="text-6xl mb-4 opacity-30">🎬</div>
-               <div class="text-white/40">${t('task.empty')}</div>
-             </div>`
-          : `<div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">${state.tasks.map(renderTaskCard).join('')}</div>`
-        }
-      </div>
-    `;
-  }
-
-  // ===== 渲染：Settings =====
-  function renderSettings() {
-    const t = window.i18n.t;
-    const user = state.user || {};
-    return `
-      <div class="pt-20 min-h-screen max-w-4xl mx-auto px-6 py-8">
-        <h1 class="text-3xl font-bold mb-6">${t('settings.title')}</h1>
-
-        <div class="glass-card p-6 mb-6">
-          <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
-            <span>👤</span><span>${t('settings.profile')}</span>
-          </h2>
-          <div class="grid sm:grid-cols-2 gap-4 text-sm">
-            <div>
-              <div class="text-white/40 mb-1">${t('settings.username')}</div>
-              <div class="font-semibold">${user.displayName || '-'}</div>
-            </div>
-            <div>
-              <div class="text-white/40 mb-1">${t('settings.email')}</div>
-              <div class="font-semibold">${user.email || '-'}</div>
-            </div>
-            <div>
-              <div class="text-white/40 mb-1">${t('settings.accountType')}</div>
-              <div class="font-semibold">${user.isGuest ? t('settings.accountTypeGuest') : t('settings.accountTypeUser')}</div>
-            </div>
-            <div>
-              <div class="text-white/40 mb-1">${t('common.credits')}</div>
-              <div class="font-semibold text-[#00F0FF]">${state.credits}</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="glass-card p-6 mb-6">
-          <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
-            <span>📊</span><span>${t('settings.stats')}</span>
-          </h2>
-          <div class="grid sm:grid-cols-2 gap-4 text-sm">
-            <div>
-              <div class="text-white/40 mb-1">${t('settings.totalGenerated')}</div>
-              <div class="text-3xl font-bold gradient-text">${state.totalGenerated}</div>
-            </div>
-            <div>
-              <div class="text-white/40 mb-1">${t('settings.joinedAt')}</div>
-              <div class="font-semibold">${user.uid && user.uid.startsWith('guest-') ? new Date(parseInt(user.uid.replace('guest-',''))).toLocaleDateString() : '-'}</div>
-            </div>
-          </div>
-        </div>
-
-        <div class="glass-card p-6 border border-red-500/20">
-          <h2 class="text-lg font-bold mb-2 text-red-400 flex items-center gap-2">
-            <span>⚠️</span><span>${t('settings.dangerZone')}</span>
-          </h2>
-          <p class="text-sm text-white/60 mb-4">${t('settings.clearLocalDesc')}</p>
-          <button onclick="window.vzongApp.clearLocal()" class="px-4 py-2 rounded-lg border border-red-500/40 text-red-400 hover:bg-red-500/10 transition-all text-sm">
-            ${t('settings.clearLocalBtn')}
-          </button>
-        </div>
-      </div>
-    `;
-  }
-
-  // ===== 渲染：登录弹窗 =====
-  function renderLoginDialog() {
-    const t = window.i18n.t;
-    const isLogin = state.authMode === 'login';
-    return `
-      <div class="modal-overlay" onclick="if(event.target===this) window.vzongApp.closeLoginDialog()">
-        <div class="modal-content">
-          <button onclick="window.vzongApp.closeLoginDialog()" class="absolute top-4 right-4 text-white/40 hover:text-white text-2xl leading-none">×</button>
-
-          <div class="text-center mb-6">
-            <div class="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-br from-[#00F0FF] to-[#0080FF] flex items-center justify-center font-bold text-[#0A1128] text-2xl mb-3">V</div>
-            <h2 class="text-2xl font-bold">${t('auth.loginTitle')}</h2>
-            <p class="text-sm text-white/60 mt-1">${t('auth.loginSubtitle')}</p>
-          </div>
-
-          <div class="space-y-3">
-            ${!isLogin ? `
-              <div>
-                <label class="text-xs text-white/60 mb-1 block">${t('auth.username')}</label>
-                <input id="auth-username" type="text" class="input-field" placeholder="vzong creator" />
-              </div>
-            ` : ''}
-            <div>
-              <label class="text-xs text-white/60 mb-1 block">${t('auth.email')}</label>
-              <input id="auth-email" type="email" class="input-field" placeholder="you@example.com" />
-            </div>
-            <div>
-              <label class="text-xs text-white/60 mb-1 block">${t('auth.password')}</label>
-              <input id="auth-password" type="password" class="input-field" placeholder="••••••••" />
-            </div>
-          </div>
-
-          <button onclick="window.vzongApp.handleAuth()" class="btn-primary w-full mt-5">
-            ${isLogin ? t('auth.loginBtn') : t('auth.signupBtn')}
-          </button>
-
-          <div class="text-center text-xs text-white/40 my-4">— or —</div>
-
-          <div class="grid grid-cols-2 gap-3">
-            <button onclick="window.vzongApp.handleGoogle()" class="btn-secondary text-sm flex items-center justify-center gap-2">
-              <span>🔵</span><span>Google</span>
-            </button>
-            <button onclick="window.vzongApp.handleGithub()" class="btn-secondary text-sm flex items-center justify-center gap-2">
-              <span>⚫</span><span>GitHub</span>
-            </button>
-          </div>
-
-          <button onclick="window.vzongApp.loginAsGuest()" class="w-full text-center text-sm text-white/60 hover:text-white mt-4">
-            ${t('auth.guest')} →
-          </button>
-          <p class="text-center text-xs text-white/40 mt-2">${t('auth.guestHint')}</p>
-
-          <div class="text-center text-sm text-white/60 mt-4">
-            ${isLogin ? t('auth.noAccount') : t('auth.hasAccount')}
-            <button onclick="window.vzongApp.setAuthMode('${isLogin?'signup':'login'}')" class="text-[#00F0FF] hover:underline ml-1">
-              ${isLogin ? t('auth.signup') : t('auth.login')}
-            </button>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  // ===== 渲染：积分购买弹窗 =====
-  function renderCreditsDialog() {
-    const t = window.i18n.t;
-    return `
-      <div class="modal-overlay" onclick="if(event.target===this) window.vzongApp.closeCreditsDialog()">
-        <div class="modal-content">
-          <button onclick="window.vzongApp.closeCreditsDialog()" class="absolute top-4 right-4 text-white/40 hover:text-white text-2xl leading-none">×</button>
-          <h2 class="text-2xl font-bold mb-2">${t('credits.title')}</h2>
-          <p class="text-sm text-white/60 mb-6">${t('credits.subtitle')}</p>
-          <div class="space-y-3">
-            ${[
-              { name: t('credits.pack1'), desc: t('credits.pack1Desc'), price: '¥9', amount: 20 },
-              { name: t('credits.pack2'), desc: t('credits.pack2Desc'), price: '¥39', amount: 110, popular: true },
-              { name: t('credits.pack3'), desc: t('credits.pack3Desc'), price: '¥169', amount: 580 },
-            ].map(p => `
-              <div class="glass-card p-4 flex items-center justify-between ${p.popular?'border-[#00F0FF] pulse-glow':''}">
-                <div>
-                  <div class="font-bold flex items-center gap-2">
-                    ${p.popular ? '<span class="text-xs px-2 py-0.5 rounded bg-[#00F0FF] text-[#0A1128]">HOT</span>' : ''}
-                    ${p.name}
-                  </div>
-                  <div class="text-sm text-white/60 mt-1">${p.desc}</div>
-                </div>
-                <div class="text-right">
-                  <div class="text-xl font-bold gradient-text mb-1">${p.price}</div>
-                  <button onclick="window.vzongApp.buyCredits(${p.amount})" class="btn-primary text-xs px-4 py-1.5">${t('credits.buy')}</button>
-                </div>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  // ===== 主渲染 =====
-  function render() {
-    const app = document.getElementById('app');
-    if (!app) return;
-
-    let content = '';
-    switch (state.view) {
-      case 'landing': content = renderLanding(); break;
-      case 'dashboard': content = renderDashboard(); break;
-      case 'gallery': content = renderGallery(); break;
-      case 'settings': content = renderSettings(); break;
-      default: content = renderLanding();
-    }
-
-    app.innerHTML = `
-      ${renderNav()}
-      <main class="fade-in">${content}</main>
-      ${state.showLoginDialog ? renderLoginDialog() : ''}
-      ${state.showCreditsDialog ? renderCreditsDialog() : ''}
-    `;
-
-    // 应用翻译（针对 data-i18n 元素）
-    window.i18n.applyTranslations(app);
-
-    // 同步语言
-    document.documentElement.lang = state.lang === 'zh' ? 'zh-CN' : 'en';
-  }
-
-  // ===== 局部刷新工单面板（避免输入时失去焦点） =====
-  function refreshWorkOrderPanel() {
-    if (state.view !== 'dashboard') return;
-    // 找到工单所在的 glass-card（第二个，在 lg:col-span-2 之后）
-    const cards = document.querySelectorAll('#app .glass-card');
-    if (cards.length < 2) return;
-    // Dashboard 中第 2 个 glass-card 是工单区（lg:col-span-1）
-    const workOrderCard = cards[1];
-    workOrderCard.innerHTML = renderWorkOrder();
-  }
-
-  // ===== 公共 API =====
-  window.vzongApp = {
-    navigate(view) { state.view = view; window.scrollTo(0, 0); render(); },
-    setLang(lang) { window.i18n.setLang(lang); state.lang = lang; render(); },
-    startCreating() {
-      if (!state.user) {
-        state.showLoginDialog = true;
-        render();
-        return;
-      }
-      state.view = 'dashboard';
-      render();
-    },
-    setTab(tab) { state.activeTab = tab; updateWorkOrder(); render(); },
-    setTTVPrompt(v) {
-      state.ttvPrompt = v;
-      updateWorkOrder();
-      refreshWorkOrderPanel();
-    },
-    setITVPrompt(v) {
-      state.itvPrompt = v;
-      // 同步到 textarea（仅在值不一致时更新，避免光标跳动）
-      const ta = document.querySelector('textarea[oninput*="setITVPrompt"]');
-      if (ta && ta.value !== v) ta.value = v;
-      updateWorkOrder();
-      refreshWorkOrderPanel();
-    },
-    uploadImage(file) { handleImageUpload(file); },
-    setCamera(v) { state.cameraMovement = v; updateWorkOrder(); render(); },
-    setDuration(v) { state.duration = v; updateWorkOrder(); render(); },
-    toggleStyle(s) {
-      const i = state.styles.indexOf(s);
-      if (i >= 0) {
-        if (state.styles.length > 1) state.styles.splice(i, 1);
-      } else {
-        state.styles.push(s);
-      }
-      updateWorkOrder();
-      render();
-    },
-    toggleAdvanced() { state.advancedOpen = !state.advancedOpen; render(); },
-    generate() { handleGenerate(); },
-    downloadTask(id) { downloadTask(id); },
-    deleteTask(id) { deleteTask(id); },
-    retryTask(id) {
-      const task = state.tasks.find(t => t.id === id);
-      if (task) {
-        task.status = 'queued';
-        task.progress = 0;
-        task.error = null;
-        render();
-        startVideoGeneration(id, task.params);
-      }
-    },
-    copyWorkOrder() {
-      if (!state.currentWorkOrder) return;
-      const text = window.WorkOrder.workOrderToText(state.currentWorkOrder, state.lang);
-      navigator.clipboard.writeText(text).then(() => {
-        toast(window.i18n.t('common.copied'), 'success');
-      }).catch(() => {
-        // Fallback
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        ta.remove();
-        toast(window.i18n.t('common.copied'), 'success');
-      });
-    },
-    openLoginDialog() { state.showLoginDialog = true; render(); },
-    closeLoginDialog() { state.showLoginDialog = false; render(); },
-    setAuthMode(m) { state.authMode = m; render(); },
-    async handleAuth() {
-      const email = document.getElementById('auth-email').value.trim();
-      const password = document.getElementById('auth-password').value;
-      if (!email || !password) {
-        toast('请填写邮箱和密码', 'error');
-        return;
-      }
-      try {
-        if (state.authMode === 'signup') {
-          const username = document.getElementById('auth-username').value.trim() || email.split('@')[0];
-          await signupWithEmail(email, password, username);
-        } else {
-          await loginWithEmail(email, password);
-        }
-        state.showLoginDialog = false;
-        // 等待 onAuthStateChanged 触发 render
-      } catch (e) {
-        toast(e.message || window.i18n.t('error.auth'), 'error');
-      }
-    },
-    async handleGoogle() {
-      try { await loginWithGoogle(); state.showLoginDialog = false; }
-      catch (e) { toast(e.message || window.i18n.t('error.auth'), 'error'); }
-    },
-    async handleGithub() {
-      try { await loginWithGithub(); state.showLoginDialog = false; }
-      catch (e) { toast(e.message || window.i18n.t('error.auth'), 'error'); }
-    },
-    loginAsGuest() { loginAsGuest(); },
-    logout() { logout(); },
-    openCreditsDialog() { state.showCreditsDialog = true; render(); },
-    closeCreditsDialog() { state.showCreditsDialog = false; render(); },
-    buyCredits(amount) {
-      addCredits(amount);
-      state.showCreditsDialog = false;
-      render();
-    },
-    clearLocal() {
-      if (!confirm('确认清除所有本地数据？此操作不可撤销。')) return;
-      localStorage.removeItem('vzong-state');
+  async function handleClearLocal() {
+    const sure = confirm(window.i18n.t('settings.clearLocalConfirm'));
+    if (!sure) return;
+    try {
+      await window.GalleryDB.clearAll();
+      localStorage.removeItem('vzong-state-v2');
       localStorage.removeItem('vzong-guest');
-      Object.keys(localStorage).filter(k => k.startsWith('vzong-credits-')).forEach(k => localStorage.removeItem(k));
-      state.tasks = [];
+      state.tutorialProgress = {};
+      state.workshopCalls = 0;
       state.user = null;
-      state.credits = 0;
-      state.totalGenerated = 0;
-      state.view = 'landing';
-      toast('已清除本地数据', 'success');
-      render();
-    },
-  };
+      state.galleryItems = [];
+      toast('✓', 'success');
+      ensureGuest();
+      navigate('landing');
+    } catch (e) {
+      toast(window.i18n.t('error.generic'), 'error');
+    }
+  }
 
-  // ===== 监听语言变化 =====
-  window.addEventListener('lang-change', () => {
-    state.lang = window.i18n.getLang();
-    render();
-  });
+  // ===== 工具函数 =====
+  function escapeHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function copyToClipboard(text) {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+    } else {
+      fallbackCopy(text);
+    }
+  }
+
+  function fallbackCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+
+  function formatDuration(sec) {
+    if (!sec || sec < 1) return '0s';
+    if (sec < 60) return `${Math.round(sec)}s`;
+    const m = Math.floor(sec / 60);
+    const s = Math.round(sec % 60);
+    return `${m}m ${s}s`;
+  }
+
+  function formatSize(bytes) {
+    if (!bytes) return '0 B';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  }
+
+  function formatDate(ts) {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${dd}`;
+  }
 
   // ===== 启动 =====
-  function boot() {
+  async function boot() {
     loadState();
-    setupAuthListener();
-    // 初次渲染
-    render();
-    // 如果已配置 Firebase，等待 onAuthStateChanged
-    // 如果未配置，立即加载访客积分
-    if (!window.fbConfig.isConfigured) {
-      if (state.user) loadUserCredits();
-    } else if (state.user && state.user.isGuest) {
-      loadUserCredits();
+    ensureGuest();
+
+    // 隐藏 boot loader
+    const loader = document.getElementById('boot-loader');
+    if (loader) {
+      loader.style.transition = 'opacity 0.3s';
+      loader.style.opacity = '0';
+      setTimeout(() => loader.remove(), 300);
     }
-    // 尝试再次初始化 Firebase（防止 SDK 异步加载）
-    setTimeout(() => {
-      if (!window.fbConfig.isConfigured) {
-        window.fbConfig.init();
-        setupAuthListener();
-        if (state.user) loadUserCredits();
-      }
-    }, 1500);
+
+    render();
+
+    // 注册 Firebase 登录状态监听
+    setupAuthObserver();
+
+    // 异步检测 Ollama 状态（不阻塞首屏）
+    checkOllamaStatus().then(() => {
+      if (state.view === 'workshop') render();
+    });
+
+    // 异步加载画廊（仅 gallery 视图需要）
+    if (state.view === 'gallery') {
+      await loadGallery();
+      render();
+    }
+
+    // 监听语言切换
+    window.addEventListener('lang-change', () => {
+      state.lang = window.i18n.getLang();
+      render();
+    });
   }
 
   if (document.readyState === 'loading') {

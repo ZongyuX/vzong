@@ -1,160 +1,158 @@
-# vzong · AI视频工坊
+# vzong · AI视频导航
 
-> 用想象力驱动视频未来 - AI 视频生成 SaaS 工具
+> **本地生成 · 云端引导** —— 一个把生成能力交还给用户、网站只做引导与展示的 AI 视频创作社区。
 
-## 📦 文件清单
+## 核心理念
+
+vzong 不调用任何付费的 AI 视频 API。我们把"能否生成"的责任和"硬件门槛"交给用户，网站聚焦于提供：
+
+- 📚 **完整的图文教程**：从零开始跑通 ComfyUI + LTX
+- ✨ **本地提示词增强**：调用本机 Ollama 服务，把一句话想法扩展为专业工单
+- 🎬 **个人作品画廊**：上传、分类、管理你在本地生成的视频
+
+## 三大核心功能
+
+### 1. 教程系统（Tutorials）
+
+6 章完整图文教程，覆盖 ComfyUI + LTX 从安装到出片的全流程：
+
+| 章 | 标题 | 难度 | 预计时长 |
+|---|---|---|---|
+| 1 | 准备工作（Python / Git / CUDA） | 入门 | 15 min |
+| 2 | 安装 ComfyUI（便携版 + Manager） | 入门 | 20 min |
+| 3 | 下载 LTX 模型（含 T5 编码器） | 进阶 | 15 min |
+| 4 | 配置工作流（节点解析 + 参数调优） | 进阶 | 25 min |
+| 5 | 生成第一个视频（含图生视频） | 入门 | 10 min |
+| 6 | 常见问题排查（OOM / 模型加载 / 画质） | 高级 | 15 min |
+
+每章支持代码块一键复制、注意事项 / 小贴士高亮、标记完成进度（本地保存）。
+
+### 2. 创意工坊（Workshop）
+
+内置**提示词增强器**：
+
+- 输入一句话想法（如"一只柴犬在草地上追蝴蝶"）
+- 选择运镜（推/拉/摇/移/随机）、时长（5-15秒）、风格（7种）
+- 点击按钮调用**本机 Ollama 服务**（如 llama3.2、qwen2.5），生成专业英文提示词
+- 同时生成 **Sora 2 风格 6 模块结构化工单**（主体/场景/动作/镜头/风格/约束）
+- 一键复制完整提示词或工单
+
+**Ollama 未启动时自动降级**到内置规则增强器，仍能生成基础工单。
+
+### 3. 个人画廊（Gallery）
+
+- 上传 MP4 / WebM / MOV 视频（最大 200MB / 单文件）
+- 支持拖拽上传
+- 视频文件保存在浏览器 **IndexedDB** 中（不上传到任何服务器）
+- 按风格筛选、按时间排序、按标题/描述搜索
+- 在线播放、下载、编辑元数据（标题/描述/风格/原始提示词）
+- 统计：作品总数、总时长、占用空间、风格数量
+- 设置页支持导出画廊元数据为 JSON
+
+## 技术栈
+
+- **HTML5 + Vanilla JavaScript**（无 React、无构建步骤）
+- **Tailwind CSS v4** via `@tailwindcss/browser@4` CDN
+- **Firebase 10.12.0** compat 模式（可选，用于未来云端同步）
+- **IndexedDB** 用于视频文件本地持久化
+- **Ollama HTTP API** 用于本地 LLM 调用
+- 设计：暗色主题 + 玻璃拟态，主色 `#0A1128`，强调色 `#00F0FF`
+
+## 文件结构
 
 ```
 vzong-app/
-├── index.html          ← 入口 HTML（2.5 KB，加载 CDN 资源）
-├── styles.css          ← 自定义样式（10 KB，深邃科技蓝主题）
-├── firebase-config.js  ← Firebase 初始化（用户提供的真实配置）
-├── i18n.js             ← 中英双语字典（16 KB）
-├── work-order.js       ← Sora 2 结构化工单生成器（10 KB）
-├── app.js              ← 主应用逻辑（53 KB，vanilla JS）
-└── README.md           ← 本文档
+├── index.html           (3.0K)  入口 HTML，加载 Tailwind + Firebase + 自定义脚本
+├── styles.css           (14K)   暗色主题样式（玻璃拟态、代码块、视频卡片等）
+├── firebase-config.js   (1.7K)  Firebase 配置（项目: zongv-65dec）
+├── i18n.js              (29K)   中英双语完整字典
+├── tutorials.js         (49K)   6 章教程数据（每章中英双语）
+├── work-order.js        (10K)   Sora 2 风格结构化工单生成器
+├── ollama.js            (6.8K)  Ollama API 客户端
+├── gallery-db.js        (5.1K)  IndexedDB 视频存储 CRUD
+├── app.js               (63K)   主应用逻辑（5 视图：landing/tutorials/workshop/gallery/settings）
+├── README.md            (本文件)
+└── .nojekyll                    GitHub Pages 必需
 ```
 
-**总大小**：约 112 KB（不含 CDN 资源）
+## 部署到 GitHub Pages
 
-## 🚀 部署到 GitHub Pages
+1. 解压后将 `vzong-app/` 内**所有文件**复制到 GitHub 仓库根目录
+2. 推送到 `main` 分支
+3. 进入仓库 Settings → Pages → Source: Branch `main`, /root → Save
+4. 等 1-2 分钟，访问 `https://<用户名>.github.io/<仓库名>/`
 
-### 方式 A：直接部署（推荐）
+> 因为使用 Tailwind CDN + Firebase CDN，无需任何构建步骤，开箱即用。
 
-1. 在 GitHub 新建一个仓库，例如 `vzong-app`
-2. 将 `vzong-app/` 目录下**所有文件**复制到仓库根目录
-3. 推送到 `main` 分支
-4. 进入仓库 **Settings → Pages**
-5. Source 选择 `Deploy from a branch`
-6. Branch 选择 `main`，目录选 `/ (root)`
-7. 保存后等待 1-2 分钟
-8. 访问 `https://<你的用户名>.github.io/vzong-app/`
-
-### 方式 B：用户根域名部署
-
-1. 新建仓库 `<你的用户名>.github.io`
-2. 将所有文件推送到 `main` 分支
-3. 同样在 Settings → Pages 启用
-4. 访问 `https://<你的用户名>.github.io/`
-
-## ✨ 核心特性
-
-- 🌐 **中英双语切换**：右上角一键切换中/EN，所有界面文案同步
-- 🔐 **Firebase 认证**：邮箱密码、Google、GitHub 三种登录方式 + 访客模式
-- 💰 **积分系统**：访客模式自动赠送 20 积分，登录后云端同步
-- 🎬 **图生视频**：参考阿里万相 Wan2.5 / Google Veo3 设计
-  - 并排图片上传（JPG/PNG，最大 5MB）+ 文字指令输入
-  - 3 个内置示例提示词
-  - 折叠的"高级设置"：运镜控制（推/拉/摇/移/随机）、视频时长（5-15s 滑块）、风格滤镜（7种胶囊按钮）
-- 📋 **Sora 2 结构化工单**：自动将用户指令扩展为 6 模块
-  - 主体 / 场景 / 动作 / 镜头 / 风格 / 约束
-  - 一键复制完整工单
-- 🎨 **7 种风格滤镜**：电影感、赛博朋克、水墨风、动漫、写实、奇幻、水彩
-- 🖼️ **Canvas 缩略图生成**：纯前端生成动态几何动画快照
-- 📊 **任务管理**：实时进度、缩略图、下载、删除、重试
-- 💾 **本地持久化**：所有任务、积分、设置保存在 localStorage
-
-## 🎨 设计风格
-
-- 主色：深邃科技蓝 `#0A1128`
-- 强调色：亮青色 `#00F0FF`
-- 字体：系统默认（支持中英文）
-- 暗色模式
-- 玻璃拟态（glassmorphism）卡片
-- 渐变发光按钮
-- 流畅动画过渡
-
-## 🛠️ 技术栈
-
-- **HTML5 + Vanilla JavaScript**（无 React、无构建步骤）
-- **Tailwind CSS v4**（通过 CDN 加载）
-- **Firebase 10.12.0**（compat 模式，CDN 加载）
-  - Authentication
-  - Firestore（用户积分云端同步）
-
-## 🧪 本地预览
+## 本地预览
 
 ```bash
-# 方式 1：Python 内置服务器
 cd vzong-app
-python3 -m http.server 3000
-# 访问 http://localhost:3000
-
-# 方式 2：Node serve
-npx serve vzong-app
-
-# 方式 3：直接打开
-# 在文件管理器中双击 index.html 也可工作（但需要联网加载 CDN）
+python3 -m http.server 8000
+# 浏览器打开 http://localhost:8000/
 ```
 
-## ⚙️ Firebase 配置
+## 使用流程
 
-已在 `firebase-config.js` 中配置真实 Firebase 项目：
+1. **学习教程**：从首页进入"教程"，按章节学习 ComfyUI + LTX 安装
+2. **准备 Ollama**（可选）：访问 ollama.com 下载安装，运行 `ollama pull llama3.2`
+3. **生成提示词**：进入"创意工坊"，输入想法，点击增强按钮
+4. **本地生成视频**：在 ComfyUI 中粘贴提示词，运行工作流出片
+5. **上传到画廊**：回到 vzong "我的画廊"，上传你的视频作品
 
-```js
-const firebaseConfig = {
-  apiKey: "AIzaSyCHh6hHsHo7niP_Rztnb_ZyROgPZxYJ2q8",
-  authDomain: "zongv-65dec.firebaseapp.com",
-  projectId: "zongv-65dec",
-  storageBucket: "zongv-65dec.firebasestorage.app",
-  messagingSenderId: "549323863140",
-  appId: "1:549323863140:web:1904ffa5d1c003d8da5b71",
-  measurementId: "G-LPB2Q0N1L1"
-};
-```
+## 设计要点
 
-### 启用 Firebase 服务
+- **零成本运行**：GitHub Pages 免费托管，无后端服务器
+- **隐私优先**：所有视频仅存浏览器本地，永不上传
+- **降级友好**：Ollama 离线时仍能用内置规则增强；IndexedDB 不可用时给出明确错误
+- **中英双语**：所有界面文案、教程内容、提示词模板都支持中英切换
+- **响应式**：桌面/平板/手机自适应，移动端导航横向滚动
 
-1. 访问 [Firebase Console](https://console.firebase.google.com/)，进入 `zongv-65dec` 项目
-2. **Authentication** → Sign-in method → 启用：
-   - Email/Password
-   - Google
-   - GitHub
-3. **Firestore Database** → Create database → Production mode
-4. **添加 Firestore 安全规则**（允许已登录用户读写自己的积分）：
-   ```
-   rules_version = '2';
-   service cloud.firestore {
-     match /databases/{database}/documents {
-       match /userCredits/{userId} {
-         allow read, write: if request.auth != null && request.auth.uid == userId;
-       }
-     }
-   }
-   ```
+## 浏览器要求
 
-## 📝 使用流程
+- 现代浏览器（Chrome 100+ / Edge 100+ / Firefox 100+ / Safari 15+）
+- 启用 JavaScript
+- 支持 IndexedDB（用于画廊视频存储）
+- 支持 File API（用于视频上传）
 
-1. 打开网站 → 看到 Landing 页面
-2. 点击"免费开始创作" → 弹出登录弹窗
-3. 选择：邮箱注册 / Google / GitHub / 访客模式
-4. 进入 Dashboard → 选择"文生视频"或"图生视频"
-5. （图生视频）上传图片 + 输入动作指令
-6. 展开"高级设置"调整运镜、时长、风格
-7. 查看 Sora 2 结构化工单（自动生成）
-8. 点击"生成视频 ✨"
-9. 等待生成完成 → 下载或查看作品
+## 登录系统
 
-## 🔧 二次开发
+支持四种登录方式（全部连接 Firebase Auth）：
 
-本项目为纯静态网站，无构建步骤。修改任意文件后刷新浏览器即可看到效果。
+1. **Google 一键登录** —— 弹窗 OAuth，被屏蔽时自动降级到 redirect
+2. **GitHub 一键登录** —— 弹窗 OAuth，同上
+3. **邮箱 + 密码** —— 支持登录/注册切换，注册时可设置用户名
+4. **访客模式** —— 不调用 Firebase，数据仅保存在本地
 
-### 修改文案
+### Firebase 控制台需要启用的登录方式
 
-编辑 `i18n.js` 中的 `translations.zh` 和 `translations.en` 对象。
+进入 Firebase Console → Authentication → Sign-in method，启用以下任一/全部：
 
-### 修改 Firebase 配置
+- **Email/Password**（邮箱密码登录）
+- **Google**（一键登录，需配置项目公开邮箱）
+- **GitHub**（需在 GitHub 创建 OAuth App，把 Client ID/Secret 填入 Firebase）
 
-编辑 `firebase-config.js` 中的 `firebaseConfig` 对象。
+### 域名授权
 
-### 修改工单生成逻辑
+部署后需要在 Firebase Console → Authentication → Settings → Authorized domains 添加你的域名：
 
-编辑 `work-order.js` 中的关键词映射规则和 `generateWorkOrder()` 函数。
+- `localhost`（本地开发）
+- `<用户名>.github.io`（GitHub Pages 部署后）
 
-### 接入真实 AI 视频 API
+否则会报 `auth/unauthorized-domain` 错误。
 
-修改 `app.js` 中的 `startVideoGeneration()` 函数，替换 Canvas 模拟为真实 API 调用（如 Sora / Wan / Veo / Kling）。
+### 登录状态自动同步
 
-## 📄 许可证
+- 通过 `onAuthStateChanged` 监听全局登录状态
+- 用户登录/退出会自动同步到 Firestore `users` 集合
+- 退出登录时若是 Firebase 用户会调用 `signOut()`，若是访客只清本地状态
 
-MIT License
+## 许可与致谢
+
+- 教程中提到的所有软件（ComfyUI / LTX-Video / Ollama / Python / Git / ffmpeg）均属其原作者所有
+- vzong 仅作为引导与展示工具，不分发上述软件
+- 感谢 Lightricks 团队开源 LTX-Video 模型
+
+---
+
+© 2026 vzong · AI视频导航. 本地生成，云端引导。

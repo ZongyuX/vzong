@@ -4,16 +4,16 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#0A1128" />
-  <meta name="description" content="vzong · AI视频工坊 - 用想象力驱动视频未来。支持文生视频、图生视频、视频风格化。" />
-  <title>vzong · AI视频工坊 | 用想象力驱动视频未来</title>
+  <meta name="description" content="vzong · AI视频导航 - 本地生成 AI 视频的引导中心与作品展示台。提供 ComfyUI + LTX 教程、Ollama 提示词增强器、个人视频画廊。" />
+  <meta name="keywords" content="AI视频,ComfyUI,LTX,Ollama,本地生成,视频教程,提示词增强,画廊" />
+  <title>vzong · AI视频导航 | 本地生成 · 云端引导</title>
 
   <!-- Tailwind CSS via CDN -->
   <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4" defer></script>
 
-  <!-- Firebase (compat mode for vanilla JS) -->
+  <!-- Firebase (compat mode for vanilla JS) - 仅用于可选的云端同步 -->
   <link rel="preconnect" href="https://www.gstatic.com" crossorigin />
   <link rel="dns-prefetch" href="https://www.gstatic.com" />
-  <link rel="dns-prefetch" href="https://firestore.googleapis.com" />
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
@@ -45,7 +45,10 @@
   <!-- ===== App Scripts (load order matters) ===== -->
   <script src="firebase-config.js"></script>
   <script src="i18n.js"></script>
+  <script src="tutorials.js"></script>
   <script src="work-order.js"></script>
+  <script src="ollama.js"></script>
+  <script src="gallery-db.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
